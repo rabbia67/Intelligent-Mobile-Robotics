@@ -1,0 +1,624 @@
+function rrt_tricycle_path_planning_EKF_Ellipse()
+    % RRT Path Planning with Tricycle Robot and EKF with Uncertainty Ellipses
+    % This function performs RRT-based path planning for a non-holonomic tricycle
+    % robot with a trailer in a 2D environment, applies an Extended Kalman Filter
+    % to correct the path, and simulates the robot following the corrected path
+    % with uncertainty ellipses superimposed on the robot after each step.
+    
+    clc;
+    clear;
+    close all;
+
+    %% --- 1) ENVIRONMENT SETUP ---
+
+    % Environment dimensions
+    env_width = 54;
+    env_height = 33;
+
+    % Bounding rectangle [x, y, width, height]
+    box_size = [-27, -16, env_width, env_height]; % [x, y, width, height]
+
+    % Corner rectangles [x, y, width, height]
+    corner_rectangles = [
+        -27,   -16, 7, 3;    % Bottom-left
+        18,  -16, 9, 4;      % Bottom-right
+        -27,   13, 7, 4;     % Top-left
+        18,  13, 9, 4;       % Top-right
+    ];
+
+    % L-shaped blocks (two rectangles each)
+    L_shapes = [
+        % L-shape in top-middle
+        -13, 2, 12, 15;    % Horizontal part
+        -13, 13, 23, 4;    % Vertical part
+
+        % L-shape in right-middle
+        19, -8, 8, 17;     % Vertical part
+        7, 2, 20, 7;       % Horizontal part
+
+        % L-shape in bottom-middle
+        -13, -16, 24, 5;   % Horizontal part
+        -1, -16, 12, 13;   % Vertical part
+
+        % L-shape in left-middle
+        -27, -7, 7, 16;    % Vertical part
+        -27, -7, 18, 5;    % Horizontal part
+    ];
+
+    % Combine all rectangles for collision checks
+    all_rectangles = [corner_rectangles; L_shapes];
+
+    % Define robot and trailer dimensions
+    robot_radius = 0.25;  % Adjust based on your robot's size
+
+    % Inflate obstacles by robot_radius
+    inflated_rectangles = inflateObstacles(all_rectangles, robot_radius);
+
+    % Define start point
+    start_pt = [-26, 11];
+
+    %% --- 2) CREATE FIGURE AND DRAW ENVIRONMENT ---
+
+    % Create a figure for both RRT and robot simulation
+    figure();
+    hold on; axis equal; grid on;
+    xlim([box_size(1)-1, box_size(1)+box_size(3)+1]); % [-28, 55]
+    ylim([box_size(2)-1, box_size(2)+box_size(4)+1]); % [-17, 33]
+    title('Kalman Filter Implementation on Tricycle Robot');
+    xlabel('X'); ylabel('Y');
+
+    % Draw environment background
+    rectangle('Position', box_size, 'FaceColor', [0.8 0.8 0.8], 'EdgeColor', 'b');
+
+    % Plot corner rectangles (blue)
+    for i = 1:size(corner_rectangles, 1)
+        rectangle('Position', corner_rectangles(i, :), 'FaceColor', [0.2 0.2 0.8], 'EdgeColor', 'b');
+    end
+
+    % Plot L-shaped blocks (blue)
+    for i = 1:size(L_shapes, 1)
+        rectangle('Position', L_shapes(i, :), 'FaceColor', [0.2 0.2 0.8], 'EdgeColor', 'b');
+    end
+
+    % Plot start point (green)
+    plot(start_pt(1), start_pt(2), 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+
+    % Prompt user to select the goal point on the graph
+    disp('Please select the goal point on the graph by clicking.');
+    [goal_x, goal_y] = ginput(1);
+    goal_pt = [goal_x, goal_y];
+
+    % Check if the goal point is within bounds
+    if goal_x < box_size(1) || goal_x > (box_size(1) + box_size(3)) || ...
+       goal_y < box_size(2) || goal_y > (box_size(2) + box_size(4))
+        error('Goal point is out of bounds. Please restart and select a valid point within the environment.');
+    end
+
+    % Plot the selected goal point (red)
+    plot(goal_pt(1), goal_pt(2), 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+    disp(['Goal point selected at: (', num2str(goal_x), ', ', num2str(goal_y), ')']);
+
+    %% --- 3) VIDEO SETUP ---
+    video_filename = 'Kalman_Filter_with_Tricycle_Robot.avi';  % Name of the video file
+    video_obj = VideoWriter(video_filename);  % Create VideoWriter object for recording
+    video_obj.FrameRate = 30;  % Set frame rate for the video
+    open(video_obj);  % Open the video file for writing
+
+    %% --- 4) RRT PARAMETERS AND FUNCTIONS ---
+    max_nodes   = 30000;   % Maximum number of nodes
+    step_size   = 0.3;      % Reduced step size for finer growth
+    goal_radius = 0.5;      % Distance threshold to consider goal "reached"
+    goal_bias   = 0.3;      % Increased probability of biasing samples towards goal
+
+    % Tree structure: 
+    % - nodes (Nx2 matrix)
+    % - edges (Mx2 matrix: [parent_index, child_index])
+    tree.nodes = start_pt;
+    tree.edges = [];
+
+    % Collision check: point inside any inflated rectangle?
+    isInCollision = @(pt) any( arrayfun(@(i) ...
+        (pt(1) >= inflated_rectangles(i,1) && pt(1) <= inflated_rectangles(i,1) + inflated_rectangles(i,3)) && ...
+        (pt(2) >= inflated_rectangles(i,2) && pt(2) <= inflated_rectangles(i,2) + inflated_rectangles(i,4)), ...
+        1:size(inflated_rectangles,1)) );
+
+    % Out of bounds?
+    isOutOfBounds = @(pt) (pt(1) < box_size(1) || pt(1) > (box_size(1) + box_size(3)) || ...
+                           pt(2) < box_size(2) || pt(2) > (box_size(2) + box_size(4)));
+
+    %% --- 5) RRT SEARCH ---
+
+    disp('Running RRT...');
+
+    path_found = false;
+    for i = 1:max_nodes
+        % Sample random point in the space (with goal bias)
+        if rand() < goal_bias
+            rand_pt = goal_pt;
+        else
+            rand_pt = [box_size(1) + rand()*env_width, box_size(2) + rand()*env_height];
+        end
+
+        % Find nearest node
+        diffs = tree.nodes - rand_pt;
+        dists = sqrt(sum(diffs.^2, 2));
+        [~, nearest_idx] = min(dists);
+
+        nearest_node = tree.nodes(nearest_idx,:);
+
+        % Step from nearest_node toward rand_pt
+        dir_vec = rand_pt - nearest_node;
+        dist_sample = norm(dir_vec);
+        if dist_sample < 1e-12
+            continue;
+        end
+        dir_vec = dir_vec / dist_sample;  % unit direction
+        new_node = nearest_node + step_size * dir_vec;
+
+        % Collision / bounds check for new_node
+        if isOutOfBounds(new_node) || isInCollision(new_node)
+            continue;
+        end
+
+        % Check collision along the edge from nearest_node to new_node
+        if checkEdgeCollision(nearest_node, new_node, inflated_rectangles)
+            continue;
+        end
+
+        % Add new node
+        tree.nodes = [tree.nodes; new_node];
+        new_idx    = size(tree.nodes,1);
+        tree.edges = [tree.edges; nearest_idx, new_idx];
+
+        % Plot the tree extension
+        plot([nearest_node(1), new_node(1)], [nearest_node(2), new_node(2)], 'y');
+        drawnow;
+
+        % Capture the frame and write to the video
+        frame = getframe(gcf);  % Capture current figure
+        writeVideo(video_obj, frame);  % Write the frame to the video
+
+        % Check if within goal_radius
+        if norm(new_node - goal_pt) < goal_radius
+            % Add actual goal as final node
+            if ~checkEdgeCollision(new_node, goal_pt, inflated_rectangles) && ...
+               ~isInCollision(goal_pt) && ~isOutOfBounds(goal_pt)
+                tree.nodes = [tree.nodes; goal_pt];
+                tree.edges = [tree.edges; new_idx, size(tree.nodes,1)];
+                path_found = true;
+                disp('Path found to goal!');
+                break;
+            end
+        end
+    end
+
+    %% --- 6) PATH RECONSTRUCTION ---
+    path = [];
+    if ~path_found
+        disp('Path to goal not found within max_nodes.');
+    else
+        % Reconstruct path from goal to start
+        path = goal_pt;
+        current_node = size(tree.nodes,1);  % index of the goal
+        while current_node > 1
+            parent_idx = tree.edges(tree.edges(:,2) == current_node, 1);
+            if isempty(parent_idx)
+                disp('Error in path reconstruction');
+                path = [];
+                break;
+            end
+            path = [tree.nodes(parent_idx,:); path];
+            current_node = parent_idx; 
+        end
+
+        % Plot final path by connecting path nodes
+        plot(path(:,1), path(:,2), 'b-', 'LineWidth', 2);
+    end
+
+    %% --- 7) ADD RANDOM NOISE AND APPLY EXTENDED KALMAN FILTER TO CORRECT THE PATH ---
+    corrected_path = []; % Initialize corrected_path
+    if ~isempty(path)
+        % Define noise parameters
+        noise_amplitude = 0.5; % Adjust the amplitude of the noise as needed
+        noisy_path = path + noise_amplitude * randn(size(path));
+
+        % Plot the noisy path
+        plot(noisy_path(:,1), noisy_path(:,2), 'r--', 'LineWidth', 1.5);
+
+        %% --- Apply Extended Kalman Filter to Noisy Path ---
+        % EKF parameters
+        dt = 1; % Time step (seconds)
+
+        % Initialize state and covariance
+        % Assume initial theta is estimated from first two noisy points
+        initial_theta = atan2(noisy_path(2,2) - noisy_path(1,2), noisy_path(2,1) - noisy_path(1,1));
+        initial_v = norm(noisy_path(2,:) - noisy_path(1,:)) / dt;
+        x_EKF = [noisy_path(1,1); noisy_path(1,2); initial_theta; initial_v]; % [x; y; theta; v]
+        P_EKF = eye(4); % Initial covariance
+
+        % Define process noise covariance
+        % Assume some uncertainty in motion
+        Q_EKF = 0.01 * eye(4);
+
+        % Define measurement noise covariance
+        R_EKF = 0.1 * eye(2);
+
+        % Define observation model
+        H_EKF = [1 0 0 0;
+                 0 1 0 0]; % We only measure x and y
+
+        % Initialize corrected path
+        corrected_path_EKF = zeros(size(noisy_path));
+
+        % Initialize array to store position covariance matrices
+        P_EKF_array = zeros(size(noisy_path,1), 2, 2);
+
+        % Initialize figure handles for uncertainty ellipse
+        ellipse_handle = []; % To store the ellipse plot handle
+        ellipse_delete = [];
+
+        % EKF Loop
+        disp('Applying Extended Kalman Filter to correct the path...');
+        for i = 1:size(noisy_path,1)
+            %% Prediction Step
+            % Extract current state
+            x = x_EKF;
+
+            % State Transition Function
+            f = @(x) [
+                x(1) + x(4) * cos(x(3)) * dt;
+                x(2) + x(4) * sin(x(3)) * dt;
+                x(3); % Assuming no change in orientation
+                x(4) % Assuming constant speed
+            ];
+
+            % Predict the next state
+            x_pred = f(x);
+
+            % Compute the Jacobian of f with respect to the state
+            F = [1, 0, -x(4)*sin(x(3))*dt, cos(x(3))*dt;
+                 0, 1,  x(4)*cos(x(3))*dt, sin(x(3))*dt;
+                 0, 0, 1, 0;
+                 0, 0, 0, 1];
+
+            % Predict the covariance
+            P_pred = F * P_EKF * F' + Q_EKF;
+
+            %% Update Step
+            % Measurement
+            z = noisy_path(i, :)'; % [x; y]
+
+            % Compute the Jacobian of h with respect to the state (H remains the same)
+            H = H_EKF;
+
+            % Innovation
+            y_k = z - H * x_pred;
+
+            % Innovation covariance
+            S = H * P_pred * H' + R_EKF;
+
+            % Kalman Gain
+            K = P_pred * H' / S;
+
+            % Update the state
+            x_updated = x_pred + K * y_k;
+
+            % Update the covariance
+            P_updated = (eye(4) - K * H) * P_pred;
+
+            % Store the corrected state
+            x_EKF = x_updated;
+            P_EKF = P_updated;
+
+            % Store the corrected position
+            corrected_path_EKF(i, :) = x_EKF(1:2)';
+
+            % Store the position covariance
+            P_EKF_array(i, :, :) = P_EKF(1:2,1:2);
+
+            %% --- Plot Uncertainty Ellipse ---
+            % Extract position covariance
+            P_xy = squeeze(P_EKF_array(i, :, :));
+
+            % Calculate the ellipse parameters
+            [eig_vec, eig_val] = eig(P_xy);
+
+            % Confidence level (e.g., 95%)
+            confidence = 0.95;
+            chi_square_val = -2 * log(1 - confidence); % for 2 degrees of freedom
+
+            % Calculate the axis lengths
+            axis_lengths = sqrt(diag(eig_val)) * sqrt(chi_square_val);
+
+            % Define the angle of the ellipse
+            angle = atan2(eig_vec(2,1), eig_vec(1,1));
+
+            % Generate ellipse points
+            theta = linspace(0, 2*pi, 100);
+            ellipse_x = axis_lengths(1) * cos(theta);
+            ellipse_y = axis_lengths(2) * sin(theta);
+            R = [cos(angle) -sin(angle); sin(angle) cos(angle)];
+            ellipse_rot = R * [ellipse_x; ellipse_y];
+            ellipse_x_rot = ellipse_rot(1, :) + corrected_path_EKF(i,1);
+            ellipse_y_rot = ellipse_rot(2, :) + corrected_path_EKF(i,2);
+
+            % Plot the ellipse
+            if isgraphics(ellipse_handle)
+                set(ellipse_handle, 'XData', ellipse_x_rot, 'YData', ellipse_y_rot);
+            else
+                ellipse_handle = plot(ellipse_x_rot, ellipse_y_rot, 'y', 'LineWidth', 1.5, 'DisplayName', 'Uncertainty Ellipse');
+            end
+            drawnow;
+
+            %% Capture the frame and write to the video
+            frame = getframe(gcf);  % Capture current figure
+            writeVideo(video_obj, frame);  % Write the frame to the video
+        end
+
+        % Plot the corrected path
+        plot(corrected_path_EKF(:,1), corrected_path_EKF(:,2), 'g-', 'LineWidth', 1.5);
+
+        %% --- 8) TRICYCLE WITH TRAILER SIMULATION ALONG THE CORRECTED PATH ---
+
+        % Define tricycle and trailer parameters
+        scale = 0.25;               % scale factor for shape
+        L_tricycle = 4 * scale;    % Length of the tricycle
+        L_trailer  = 5 * scale;    % Length of the trailer
+        W_tricycle = 2 * scale;    % Width of the tricycle
+        W_trailer  = 2 * scale;    % Width of the trailer
+
+        % Define shapes
+        tricycle_shape_local = [
+             0,          -W_tricycle/2;
+             0,           W_tricycle/2;
+             L_tricycle,  0
+        ];
+        trailer_shape_local = [
+            -L_trailer/2, -W_trailer/2;
+            -L_trailer/2,  W_trailer/2;
+             L_trailer/2,  W_trailer/2;
+             L_trailer/2, -W_trailer/2
+        ];
+
+        rotate_points = @(points,theta) [cos(theta), -sin(theta); ...
+                                         sin(theta),  cos(theta)] * points';
+
+        % Simulation settings
+        dt_sim = 0.04;
+        v_tricycle = 1;           % forward speed
+        delta_max = pi/4;         % maximum steering angle
+        k_p = 2;                  % heading control gain (increased for better responsiveness)
+
+        % Choose the path to follow
+        path_to_follow = corrected_path_EKF; % Use EKF-corrected path
+        disp('Using EKF-corrected path for simulation.');
+
+        % Initialize tricycle state
+        x_tricycle = path_to_follow(1,1);
+        y_tricycle = path_to_follow(1,2);
+        theta_tricycle = initial_theta; % Initial orientation based on EKF
+        x_trailer    = x_tricycle - L_trailer * cos(theta_tricycle);
+        y_trailer    = y_tricycle - L_trailer * sin(theta_tricycle);
+        theta_trailer = theta_tricycle;
+
+        path_idx = 2; % Start from the second waypoint
+
+        % Initialize graphical objects
+        tricycle_rot   = rotate_points(tricycle_shape_local, theta_tricycle)';
+        tricycle_world = tricycle_rot + [x_tricycle, y_tricycle];
+        tricycle_patch = patch('XData', tricycle_world(:,1), 'YData', tricycle_world(:,2), ...
+                               'FaceColor', 'g', 'EdgeColor', 'k', 'LineWidth', 1.5);
+
+        trailer_rot   = rotate_points(trailer_shape_local, theta_trailer)';
+        trailer_world = trailer_rot + [x_trailer, y_trailer];
+        trailer_patch = patch('XData', trailer_world(:,1), 'YData', trailer_world(:,2), ...
+                              'FaceColor', 'r', 'EdgeColor', 'k', 'LineWidth', 1.5);
+
+        % Front wheel indicator
+        front_wheel_pos = [x_tricycle + L_tricycle * cos(theta_tricycle), ...
+                           y_tricycle + L_tricycle * sin(theta_tricycle)];
+        front_wheel = plot(front_wheel_pos(1), front_wheel_pos(2), ...
+                           'ko','MarkerSize',5,'MarkerFaceColor','w');
+
+        % Linkage line between tricycle and trailer
+        linkage = plot([x_tricycle, x_trailer], [y_tricycle, y_trailer], 'k--');
+
+        % Initialize goal_reached flag for simulation
+        goal_reached_simulation = false;
+
+        %% --- 9) SIMULATION LOOP WITH PURE PURSUIT CONTROL ---
+
+        disp('Starting simulation of tricycle robot following EKF-corrected path...');
+
+        while ~goal_reached_simulation
+            if path_idx > size(path_to_follow,1)
+                disp('Reached final waypoint. Simulation finished.');
+                frame = getframe(gcf);  % Capture final frame
+                writeVideo(video_obj, frame);  % Write the final frame to the video
+                goal_reached_simulation = true;
+                break;
+            end
+
+            % Current target point
+            current_goal = path_to_follow(path_idx, :);
+
+            % Compute steering angle to the current goal
+            desired_theta = atan2(current_goal(2) - y_tricycle, current_goal(1) - x_tricycle);
+            heading_error = desired_theta - theta_tricycle;
+            heading_error = atan2(sin(heading_error), cos(heading_error)); % wrap to [-pi, pi]
+
+            % Steering control (P-controller)
+            delta = k_p * heading_error;
+            delta = max(-delta_max, min(delta, delta_max));
+
+            % Update tricycle state
+            x_tricycle = x_tricycle + v_tricycle * cos(theta_tricycle) * dt_sim;
+            y_tricycle = y_tricycle + v_tricycle * sin(theta_tricycle) * dt_sim;
+            theta_tricycle = theta_tricycle + (v_tricycle / L_tricycle) * tan(delta) * dt_sim;
+            theta_tricycle = atan2(sin(theta_tricycle), cos(theta_tricycle)); % Normalize
+
+            % Update trailer state based on tricycle's movement
+            theta_trailer_dot = (v_tricycle / L_trailer) * sin(theta_tricycle - theta_trailer);
+            theta_trailer = theta_trailer + theta_trailer_dot * dt_sim;
+            theta_trailer = atan2(sin(theta_trailer), cos(theta_trailer)); % Normalize
+            x_trailer = x_tricycle - L_trailer * cos(theta_trailer);
+            y_trailer = y_tricycle - L_trailer * sin(theta_trailer);
+
+            % Check if reached the current goal
+            distance_to_goal = norm([x_tricycle, y_tricycle] - current_goal);
+            if distance_to_goal < 0.9
+                path_idx = path_idx + 1;
+                continue;
+            end
+
+            % Update tricycle graphical object
+            tricycle_rot   = rotate_points(tricycle_shape_local, theta_tricycle)';
+            tricycle_world = tricycle_rot + [x_tricycle, y_tricycle];
+            set(tricycle_patch, 'XData', tricycle_world(:,1), 'YData', tricycle_world(:,2));
+
+            % Update trailer graphical object
+            trailer_rot   = rotate_points(trailer_shape_local, theta_trailer)';
+            trailer_world = trailer_rot + [x_trailer, y_trailer];
+            set(trailer_patch, 'XData', trailer_world(:,1), 'YData', trailer_world(:,2));
+
+            % Update front wheel position
+            set(front_wheel, 'XData', x_tricycle + L_tricycle * cos(theta_tricycle), ...
+                             'YData', y_tricycle + L_tricycle * sin(theta_tricycle));
+
+            % Update linkage line
+            set(linkage, 'XData', [x_tricycle, x_trailer], ...
+                         'YData', [y_tricycle, y_trailer]);
+
+            % Plot uncertainty ellipse at current tricycle position
+            current_step = min(path_idx-1, size(P_EKF_array,1)); % Ensure index is within bounds
+            if current_step >=1 && mod(current_step, 2) == 0
+                P_current = squeeze(P_EKF_array(current_step, :, :));
+                plotUncertaintyEllipse([x_tricycle, y_tricycle], P_current, 0.95, 'y', 1.5);
+            end
+
+            % Check if tricycle has reached the goal point
+            if norm([x_tricycle, y_tricycle] - goal_pt) < 0.3
+                goal_reached_simulation = true;
+                disp('Tricycle has reached the goal point.');
+                frame = getframe(gcf);  % Capture frame when goal is reached
+                writeVideo(video_obj, frame);  % Write the frame to the video
+                break;
+            end
+
+            % Capture the current frame for video
+            frame = getframe(gcf);  % Capture current figure
+            writeVideo(video_obj, frame);  % Write the frame to the video
+
+            drawnow;
+            pause(dt_sim); % Pause for animation
+        end
+
+        disp('Simulation completed.');
+
+        %% --- 10) CLOSE THE VIDEO FILE ---
+        close(video_obj);
+        disp(['Video saved as ', video_filename]);
+
+    end  % End of main function
+
+    %% --- Helper Functions ---
+
+    function inflated_rectangles = inflateObstacles(all_rectangles, robot_radius)
+        % Function to inflate obstacles by robot_radius
+        inflated_rectangles = all_rectangles;
+        inflated_rectangles(:,1) = inflated_rectangles(:,1) - robot_radius;
+        inflated_rectangles(:,2) = inflated_rectangles(:,2) - robot_radius;
+        inflated_rectangles(:,3) = inflated_rectangles(:,3) + 2*robot_radius;
+        inflated_rectangles(:,4) = inflated_rectangles(:,4) + 2*robot_radius;
+    end
+
+    function collision = checkEdgeCollision(p1, p2, obstacles)
+        % Function to check if the line segment between p1 and p2
+        % intersects any of the given rectangular obstacles.
+        collision = false;
+        for i = 1:size(obstacles, 1)
+            % Define obstacle edges
+            obs_x = obstacles(i,1);
+            obs_y = obstacles(i,2);
+            obs_w = obstacles(i,3);
+            obs_h = obstacles(i,4);
+
+            % Define the four corners of the rectangle
+            corners = [
+                obs_x, obs_y;
+                obs_x + obs_w, obs_y;
+                obs_x + obs_w, obs_y + obs_h;
+                obs_x, obs_y + obs_h;
+                obs_x, obs_y
+            ];
+
+            % Check intersection with each side
+            for j = 1:4
+                q1 = corners(j, :);
+                q2 = corners(j+1, :);
+                if doLineSegmentsIntersect(p1, p2, q1, q2)
+                    collision = true;
+                    return;
+                end
+            end
+        end
+    end
+
+    function intersects = doLineSegmentsIntersect(p1, p2, q1, q2)
+        % Helper function to determine if two line segments (p1-p2 and q1-q2) intersect
+        % Returns true if they intersect, false otherwise
+
+        % Compute the direction vectors
+        d1 = p2 - p1;
+        d2 = q2 - q1;
+        denominator = d1(1)*d2(2) - d1(2)*d2(1);
+
+        if denominator == 0
+            intersects = false; % Parallel lines
+            return;
+        end
+
+        t = ((q1(1) - p1(1)) * d2(2) - (q1(2) - p1(2)) * d2(1)) / denominator;
+        u = ((q1(1) - p1(1)) * d1(2) - (q1(2) - p1(2)) * d1(1)) / denominator;
+
+        intersects = (t >= 0 && t <= 1 && u >= 0 && u <= 1);
+    end
+
+    function plotUncertaintyEllipse(position, covariance, confidence, style, linewidth)
+        % Function to plot an uncertainty ellipse based on covariance matrix
+        % position: [x, y] center of the ellipse
+        % covariance: 2x2 covariance matrix
+        % confidence: confidence level (e.g., 0.95)
+        % style: line style (e.g., 'm-')
+        % linewidth: line width
+
+        % Calculate the eigenvalues and eigenvectors
+        [eig_vec, eig_val] = eig(covariance);
+
+        % Calculate the angle of the ellipse
+        angle = atan2(eig_vec(2,1), eig_vec(1,1));
+
+        % Calculate the scaling factor for the desired confidence level
+        chi_square_val = -2 * log(1 - confidence); % for 2 degrees of freedom
+
+        % Calculate the axis lengths
+        axis_lengths = sqrt(diag(eig_val)) * sqrt(chi_square_val);
+
+        % Generate ellipse points
+        theta = linspace(0, 2*pi, 100);
+        ellipse_x = axis_lengths(1) * cos(theta);
+        ellipse_y = axis_lengths(2) * sin(theta);
+        R = [cos(angle) -sin(angle); sin(angle) cos(angle)];
+        ellipse_rot = R * [ellipse_x; ellipse_y];
+        ellipse_x_rot = ellipse_rot(1, :) + position(1);
+        ellipse_y_rot = ellipse_rot(2, :) + position(2);
+
+        %% Remove the previous ellipse if it exists
+        if isgraphics(ellipse_delete)
+            delete(ellipse_delete);
+        end
+        % Plot the ellipse
+        %plot(ellipse_x_rot, ellipse_y_rot, style, 'LineWidth', linewidth);
+        ellipse_delete = plot(ellipse_x_rot, ellipse_y_rot, style, 'LineWidth', linewidth);
+    end
+end

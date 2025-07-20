@@ -1,0 +1,428 @@
+% MyPotentialField_Path_Planning
+
+clear variables; close all; clc;
+
+%% 1. Initialize Parameters
+
+% Custom Potential Function Parameters
+k_att = 8.0;         % Reduced attractive potential scaling factor
+alpha = 1.0;         % Exponential decay rate for the attractive potential
+k_rep = 50.0;        % Repulsive potential scaling factor
+beta = 5.0;          % Gaussian spread for the repulsive potential
+
+% Thresholds
+d_goal_star = 1.0;          % Distance within which to switch to quadratic attractive potential
+Qstar = 1.5;                % Increased influence distance for the repulsive field
+goal_safety_distance = 0.5; % Distance within which to ignore repulsive potential
+
+% Robot parameters
+robot_radius = 0.3;                 % Increased radius of the robot
+error_theta_max = deg2rad(45);      % Increased maximum allowable orientation error
+v_max = 1.0;                        % Increased maximum linear velocity
+v_min = 0.5;                        % Increased minimum linear velocity
+Kp_omega = 4.0;                     % Increased proportional gain for angular speed
+omega_max = 1.5 * pi;               % Reduced maximum angular velocity
+
+% Navigation parameters
+position_accuracy = 0.3;            % Convergence threshold to stop near the goal
+dT = 0.01;                          % Increased time step
+t_max = 20000;                      % Increased maximum iterations
+
+%% 2. Input Obstacles
+
+num_of_obstacles = getNumberOfObstacles();  % Prompt for the number of obstacles
+
+% Initialize obstacles and gather user input
+obstacles = cell(num_of_obstacles,1);
+for i = 1:num_of_obstacles
+    obstacles{i} = getObstacleCoordinates(i);
+end
+
+% Inflate obstacles to account for robot size
+inflated_obstacles = inflateObstacles(obstacles, robot_radius * 1.5);
+
+%% 3. Visualization Setup
+
+figure('Name', 'Custom Potential Field-Based Path Planning', 'NumberTitle', 'off');
+hold on;
+plotObstacles(inflated_obstacles); % Plot obstacles for visual reference
+axis equal;
+grid on;
+
+%% 4. Select Start and Goal Points
+
+[start_pos, theta, goal_pos] = selectStartAndGoal(inflated_obstacles); % Set start and goal points
+
+%% 5. Initialize Path Tracking
+
+% Initialize tracking for path coordinates
+t = 1;
+X = zeros(t_max,1);
+Y = zeros(t_max,1);
+X(t) = start_pos(1);
+Y(t) = start_pos(2);
+
+%% 6. Main Navigation Loop
+
+while norm(goal_pos - start_pos) > position_accuracy && t <= t_max
+    % Calculate Potential Fields with custom potentials
+    [U_att, U_rep] = calculatePotential(start_pos, goal_pos, inflated_obstacles, ...
+        k_att, alpha, k_rep, beta, d_goal_star, Qstar, goal_safety_distance);
+    
+    % Combine the attractive and repulsive gradients
+    U = U_att + U_rep;
+    
+    % Control Law to compute linear and angular velocity
+    [v_ref, omega_ref, theta] = computeControl(U, theta, error_theta_max, Kp_omega, ...
+        v_max, omega_max, v_min, dT);
+    
+    % Predict Next Position using calculated velocities
+    new_pos = start_pos + v_ref * [cos(theta); sin(theta)] * dT;
+
+    % Check if the new position is inside any obstacle
+    if pointInObstacles(new_pos, inflated_obstacles)
+        % If the new position is invalid, reduce the linear velocity
+        disp('New position inside obstacle, reducing speed.');
+        v_ref = 0.0; % Stop movement
+        omega_ref = omega_ref * 0.5; % Reduce angular velocity to realign
+        new_pos = start_pos; % Stay at the current position
+    else
+        % Update the robot's position only if it's valid
+        start_pos = new_pos;
+    end
+    
+    % Log the updated position
+    X(t+1) = start_pos(1);
+    Y(t+1) = start_pos(2);
+    t = t + 1;
+    
+    % Plotting less frequently to speed up simulation
+    if mod(t, 20) == 0
+        plot(X(1:t), Y(1:t), '-b', 'LineWidth', 1.5); % Traveled path
+        drawnow;
+    end
+    
+    % Check if the goal is reached
+    if norm(goal_pos - start_pos) <= position_accuracy
+        disp('Goal reached successfully!');
+        break;
+    end
+end
+
+
+%% 7. Termination and Output
+
+t_total = t * dT; % Total travel time
+disp(['Travel time: ', num2str(t_total), ' seconds']);
+
+if norm(goal_pos - start_pos) <= position_accuracy
+    disp('Goal reached successfully!');
+else
+    disp('Maximum iterations reached. Goal may not have been reached.');
+end
+
+% Final Path Plot
+figure('Name', 'Final Path', 'NumberTitle', 'off');
+hold on;
+plotObstacles(inflated_obstacles);
+plot(X(1:t), Y(1:t), '-b', 'LineWidth', 1.5); % Traveled path
+plot(X(1), Y(1), 'og', 'MarkerSize', 10, 'MarkerFaceColor', 'g'); % Start point
+plot(goal_pos(1), goal_pos(2), 'or', 'MarkerSize', 10, 'MarkerFaceColor', 'r'); % Goal point
+axis equal;
+grid on;
+hold off;
+
+%% --- Function Definitions ---
+
+function [U_att, U_rep] = calculatePotential(current_pos, goal_pos, obstacles, ...
+    k_att, alpha, k_rep, beta, d_goal_star, Qstar, goal_safety_distance)
+    % Calculate attractive and repulsive potential fields for path planning
+    %
+    % Parameters:
+    %   current_pos - Current position of the robot [x, y]
+    %   goal_pos - Goal position of the robot [x, y]
+    %   obstacles - Cell array of obstacle coordinates
+    %   k_att - Attractive potential scaling factor
+    %   alpha - Exponential decay rate for the attractive potential
+    %   k_rep - Repulsive potential scaling factor
+    %   beta - Gaussian spread for the repulsive potential
+    %   d_goal_star - Threshold distance for switching to quadratic attractive potential
+    %   Qstar - Influence distance for the repulsive field
+    %   goal_safety_distance - Distance threshold to ignore repulsion near the goal
+    %
+    % Returns:
+    %   U_att - Attractive potential gradient vector
+    %   U_rep - Repulsive potential gradient vector
+
+    % Attractive potential based on distance to goal
+    delta_q = current_pos - goal_pos;
+    dist_to_goal = norm(delta_q);
+    if dist_to_goal <= d_goal_star
+        U_att = k_att * (current_pos - goal_pos); % Quadratic potential near goal
+    else
+        exp_component = exp(-alpha * dist_to_goal);
+        U_att = k_att * alpha * exp_component * (delta_q / dist_to_goal); % Exponential potential far from goal
+    end
+
+    % Initialize repulsive potential
+    U_rep = [0; 0];
+    if dist_to_goal > goal_safety_distance
+        for i = 1:length(obstacles)
+            [min_dist, closest_point] = closestPointOnObstacle(current_pos, obstacles{i});
+            if min_dist > 0 && min_dist <= Qstar
+                delta_q_obs = current_pos - closest_point;
+                exp_component = exp(-beta * (min_dist - Qstar));
+                grad_U_rep = -k_rep * beta * exp_component * (delta_q_obs / min_dist);
+                U_rep = U_rep + grad_U_rep;
+            end
+        end
+    end
+end
+
+function [min_dist, closest_point] = getClosestObstacleDistance(point, obstacles)
+    % Finds the closest obstacle distance to a given point
+    %
+    % Parameters:
+    %   point - Current position [x, y]
+    %   obstacles - Cell array of obstacle coordinates
+    %
+    % Returns:
+    %   min_dist - Minimum distance to the closest obstacle
+    %   closest_point - Coordinates of the closest point on the closest obstacle
+
+    min_dist = inf;
+    closest_point = [0; 0];
+    for i = 1:length(obstacles)
+        [dist, cp] = closestPointOnObstacle(point, obstacles{i});
+        if dist < min_dist
+            min_dist = dist;
+            closest_point = cp;
+        end
+    end
+end
+
+function [min_dist, closest_point] = closestPointOnObstacle(point, obstacle)
+    % Finds the closest point on a given obstacle to a specified point
+    %
+    % Parameters:
+    %   point - Current point [x, y]
+    %   obstacle - Obstacle coordinates as an Nx2 matrix
+    %
+    % Returns:
+    %   min_dist - Minimum distance to the obstacle
+    %   closest_point - Coordinates of the closest point on the obstacle
+
+    min_dist = inf;
+    closest_point = [0; 0];
+    num_vertices = size(obstacle, 1);
+    for j = 1:num_vertices
+        v1 = obstacle(j, :)';
+        v2 = obstacle(mod(j, num_vertices) + 1, :)';
+        [closest, dist] = distancePointToSegment(point, v1, v2);
+        if dist < min_dist
+            min_dist = dist;
+            closest_point = closest;
+        end
+    end
+end
+
+function [closest, dist] = distancePointToSegment(point, v1, v2)
+    % Calculates the closest point on a line segment to a specified point
+    %
+    % Parameters:
+    %   point - Current point [x, y]
+    %   v1, v2 - Endpoints of the line segment [x, y]
+    %
+    % Returns:
+    %   closest - Closest point on the segment to the specified point
+    %   dist - Distance from the point to the closest point on the segment
+
+    edge_vec = v2 - v1;
+    robot_vec = point - v1;
+    edge_length_sq = dot(edge_vec, edge_vec);
+    if edge_length_sq == 0
+        proj = 0;
+    else
+        proj = dot(robot_vec, edge_vec) / edge_length_sq;
+    end
+    proj = max(0, min(1, proj));
+    closest = v1 + proj * edge_vec;
+    dist = norm(point - closest);
+end
+
+function num = getNumberOfObstacles()
+    % Prompts user to input the number of obstacles
+    %
+    % Returns:
+    %   num - Number of obstacles as a non-negative integer
+
+    while true
+        num = input('Enter number of obstacles: ');
+        if isnumeric(num) && num >= 0 && floor(num) == num
+            break;
+        else
+            disp('Invalid input. Please enter a non-negative integer.');
+        end
+    end
+end
+
+function obstacle = getObstacleCoordinates(index)
+    % Prompts user to input coordinates for an obstacle
+    %
+    % Parameters:
+    %   index - Index of the obstacle (for display purposes)
+    %
+    % Returns:
+    %   obstacle - Nx2 matrix of coordinates for the obstacle vertices
+
+    prompt = sprintf('Enter coordinates for obstacle %d as a Nx2 matrix [x1, y1; x2, y2; ...]:\n', index);
+    while true
+        obstacle = input(prompt);
+        if validateObstacle(obstacle)
+            break;
+        else
+            disp('Invalid input. Please enter a valid Nx2 numeric matrix with N >= 3.');
+        end
+    end
+end
+
+function valid = validateObstacle(obstacle)
+    % Validates if the input obstacle is a numeric Nx2 matrix
+    %
+    % Parameters:
+    %   obstacle - Matrix to validate
+    %
+    % Returns:
+    %   valid - Boolean indicating if the input is a valid Nx2 matrix
+
+    valid = isnumeric(obstacle) && size(obstacle, 2) == 2 && size(obstacle, 1) >= 3;
+end
+
+function inflated_obstacles = inflateObstacles(obstacles, robot_radius)
+    % Inflates obstacles by a specified radius to account for robot size
+    %
+    % Parameters:
+    %   obstacles - Cell array of obstacle coordinates
+    %   robot_radius - Radius used for obstacle inflation
+    %
+    % Returns:
+    %   inflated_obstacles - Cell array of inflated obstacle coordinates
+
+    inflated_obstacles = cell(size(obstacles));
+    for i = 1:length(obstacles)
+        pgon = polyshape(obstacles{i}(:,1), obstacles{i}(:,2));
+        inflated_pgon = polybuffer(pgon, robot_radius, 'JointType', 'miter');
+        [x_infl, y_infl] = boundary(inflated_pgon);
+        inflated_obstacles{i} = [x_infl, y_infl];
+    end
+end
+
+function plotObstacles(obstacles)
+    % Plots obstacles on the 2D environment plot
+    %
+    % Parameters:
+    %   obstacles - Cell array of obstacle coordinates
+
+    for i = 1:length(obstacles)
+        fill(obstacles{i}(:,1), obstacles{i}(:,2), [0.8, 0.8, 0.8], 'EdgeColor', 'k'); 
+    end
+end
+
+function [start_pos, theta, goal_pos] = selectStartAndGoal(obstacles)
+    % Allows user to select start and goal points on the plot, ensuring they are outside obstacles
+    %
+    % Parameters:
+    %   obstacles - Cell array of obstacle coordinates
+    %
+    % Returns:
+    %   start_pos - Coordinates of the start position [x, y]
+    %   theta - Initial orientation (set to 0)
+    %   goal_pos - Coordinates of the goal position [x, y]
+    
+    while true
+        disp('Please select the **start point** on the plot');
+        [x, y] = ginput(1);
+        if ~pointInObstacles([x, y], obstacles)
+            start_pos = [x; y];
+            theta = 0; 
+            plot(x, y, 'og', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+            break;
+        else
+            disp('Start point is inside an obstacle. Please select a different point.');
+        end
+    end
+    
+    while true
+        disp('Please select the **goal point** on the plot');
+        [x_goal, y_goal] = ginput(1);
+        if ~pointInObstacles([x_goal, y_goal], obstacles)
+            goal_pos = [x_goal; y_goal];
+            plot(x_goal, y_goal, 'or', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+            break;
+        else
+            disp('Goal point is inside an obstacle. Please select a different point.');
+        end
+    end
+end
+
+function inside = pointInObstacles(point, obstacles)
+    % Checks if a given point is inside any obstacle
+    %
+    % Parameters:
+    %   point - Coordinates of the point to check [x, y]
+    %   obstacles - Cell array of obstacle coordinates
+    %
+    % Returns:
+    %   inside - Boolean indicating if the point is inside any obstacle
+
+    inside = false;
+    for i = 1:length(obstacles)
+        if inpolygon(point(1), point(2), obstacles{i}(:,1), obstacles{i}(:,2))
+            inside = true;
+            return;
+        end
+    end
+end
+
+function [v_ref, omega_ref, theta_new] = computeControl(U, theta, error_theta_max, ...
+    Kp_omega, v_max, omega_max, v_min, dT)
+    % Computes control signals for linear and angular velocities
+    %
+    % Parameters:
+    %   U - Combined potential field gradient vector (attractive + repulsive)
+    %   theta - Current orientation of the robot
+    %   error_theta_max - Maximum allowable orientation error
+    %   Kp_omega - Proportional gain for angular speed
+    %   v_max - Maximum linear velocity
+    %   omega_max - Maximum angular velocity
+    %   v_min - Minimum linear velocity
+    %   dT - Time step
+    %
+    % Returns:
+    %   v_ref - Reference linear velocity
+    %   omega_ref - Reference angular velocity
+    %   theta_new - Updated orientation of the robot
+
+    if norm(U) == 0
+        theta_ref = theta; % No direction change if gradient is zero
+    else
+        theta_ref = atan2(-U(2), -U(1));
+    end
+    error_theta = wrapToPi(theta_ref - theta);
+
+    % Compute the control factor (alpha) based on orientation error
+    alpha = cos(error_theta);
+    alpha = max(0, alpha); % Ensure alpha is non-negative
+
+    % Calculate reference linear velocity
+    v_ref = alpha * v_max;
+    v_ref = max(v_ref, v_min); % Ensure minimal velocity
+
+    % Calculate reference angular velocity
+    omega_ref = Kp_omega * error_theta;
+    omega_ref = max(min(omega_ref, omega_max), -omega_max);
+
+    % Update orientation
+    theta_new = theta + omega_ref * dT;
+    theta_new = wrapToPi(theta_new);
+end

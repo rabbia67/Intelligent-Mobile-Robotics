@@ -1,0 +1,531 @@
+%% Tangent Bug Algorithm Implementation 
+
+%% Define Environment - User Input for Obstacles
+% Get the number of obstacles from the user
+num_of_obstacles = input('Enter number of obstacles: ');
+% Initialize cell array to store obstacle vertices
+obstacles = cell(num_of_obstacles, 1);
+
+% Loop to get the coordinates of each obstacle from the user
+for i = 1:num_of_obstacles
+    fprintf('Enter coordinates for obstacle %d in the format [x1, y1; x2, y2; ...]:\n', i);
+    obstacles{i} = input(''); % User inputs polygon vertices
+end
+
+%% Visualization Setup
+figure_handle = figure;  % Use figure_handle to capture frames later
+hold on;
+axis equal;
+grid on;
+xlabel('X');
+ylabel('Y');
+title('Robot Navigation Path with Tangent Bug Algorithm');
+warning('off', 'MATLAB:polyshape:repairedBySimplify'); % Suppress polygon repair warnings
+
+% Plot obstacles
+for i = 1:num_of_obstacles
+    fill(obstacles{i}(:,1), obstacles{i}(:,2), [0.8, 0.8, 0.8], 'EdgeColor', 'k');
+end
+
+%% Select Start and Goal Points by Clicking on the Plot
+% Instructions for the user
+disp('Please click on the plot to select the start point.');
+
+% Get the start point from the user by clicking on the plot
+[start_x, start_y] = ginput(1);  % Wait for the user to click a point
+start = [start_x, start_y];
+fprintf('Start point selected: [%.2f, %.2f]\n', start_x, start_y);  % Print selected start point
+
+% Plot start position
+plot(start(1), start(2), 'ro', 'LineWidth', 2, 'MarkerSize', 8);
+
+% Instructions for the user to select the goal
+disp('Now click on the plot to select the goal point.');
+
+% Get the goal point from the user by clicking on the plot
+[goal_x, goal_y] = ginput(1);  % Wait for the user to click a second point
+goal = [goal_x, goal_y];
+fprintf('Goal point selected: [%.2f, %.2f]\n', goal_x, goal_y);  % Print selected goal point
+
+% Plot goal position
+plot(goal(1), goal(2), 'go', 'LineWidth', 2, 'MarkerSize', 8);
+
+%% Robot Parameters
+robot_radius = 0.5;     % Radius of the robot
+sensing_range = 2;      % Sensing range for obstacle detection
+buffer_distance = 0.7;  % Safety distance from obstacles
+stepSize = 0.05;        % Step size for robot movement
+robotPos = start;       % Initial robot position
+followBoundary = false; % Boundary following flag
+goalTolerance = 0.1;    % Tolerance for reaching the goal
+
+%% Initialize Path Tracking
+% Initialize path storage for X and Y positions
+pathX = robotPos(1);
+pathY = robotPos(2);
+path_length = 0;        % Total path length traveled
+
+% Plot robot as a disc
+disc_robot = rectangle('Position', [robotPos(1) - robot_radius, robotPos(2) - robot_radius, ...
+    2*robot_radius, 2*robot_radius], 'Curvature', [1, 1], 'FaceColor', 'b');
+
+% Initialize plot for the robot's path
+robot_path = plot(pathX, pathY, 'b-', 'LineWidth', 2);
+
+% Initialize plot for range sensor (dotted green circle)
+theta = linspace(0, 2*pi, 360);
+sensor_x = robotPos(1) + sensing_range * cos(theta);
+sensor_y = robotPos(2) + sensing_range * sin(theta);
+robot_sensor = plot(sensor_x, sensor_y, 'g--', 'LineWidth', 1);
+
+%% Tangent Bug Algorithm Implementation
+
+% Boundary following direction: 1 for clockwise, -1 for counter-clockwise
+boundaryDirection = 1;
+
+% Variables for boundary following logic
+hitPoint = [];               % Point where boundary following started
+leavePoint = [];             % Best leave point found during boundary following
+pathLengthAtHitPoint = 0;    % Path length when hit point was found
+leavePathLength = 0;         % Path length at leave point
+min_heuristic = Inf;         % Minimum heuristic value found
+leavePointFound = false;     % Flag to indicate if leave point was found
+boundaryStarted = false;     % Flag to track start of boundary following
+
+%% Video Setup
+%video_filename = 'Tangent_Bug_Sample_7.avi'; % Name of the video file
+%video_obj = VideoWriter(video_filename);  % Create VideoWriter object
+%video_obj.FrameRate = 30;  % Set the frame rate
+%open(video_obj);  % Open the video file for writing
+
+%% Main Loop for Navigation
+max_iterations = 10000; % Maximum iterations to avoid infinite loops
+iteration = 0;
+
+while true
+    iteration = iteration + 1;
+    
+    % Exit the loop if maximum iterations are reached
+    if iteration > max_iterations
+        disp('Maximum iterations reached. Exiting.');
+        break;
+    end
+
+    % Check if the robot has reached the goal
+    if norm(robotPos - goal) <= goalTolerance
+        disp('Goal reached!');
+        break;
+    end
+
+    % If not following the boundary, try moving towards the goal
+    if ~followBoundary
+        % Check if there is a line of sight to the goal
+        if isLineOfSight(robotPos, goal, obstacles, robot_radius)
+            % Move towards the goal if unobstructed
+            moveDirection = (goal - robotPos) / norm(goal - robotPos);
+            nextPos = robotPos + stepSize * moveDirection;
+
+            % Ensure the next position is safe (not inside an obstacle)
+            if ~isInsideObstacle(nextPos, robot_radius, obstacles)
+                % Update path and position
+                robotPos = nextPos;
+                pathX = [pathX; robotPos(1)];
+                pathY = [pathY; robotPos(2)];
+                path_length = path_length + stepSize;
+                updateVisualization(robotPos, robot_radius, pathX, pathY, disc_robot, robot_path, robot_sensor, sensing_range);
+                pause(0.001); % Reduced pause for faster execution
+
+                % Capture the frame for the video
+                %frame = getframe(figure_handle);  % Capture the figure
+                %writeVideo(video_obj, frame);  % Write the captured frame to the video
+
+                continue;
+            else
+                % Switch to boundary following if an obstacle blocks the path
+                disp('Obstacle detected blocking the path. Starting boundary following.');
+                followBoundary = true;
+                hitPoint = robotPos;
+                pathLengthAtHitPoint = path_length;
+                min_heuristic = path_length + norm(robotPos - goal);
+                leavePoint = robotPos;
+                leavePathLength = path_length;
+                leavePointFound = false;
+                boundaryStarted = true;
+
+                % Determine which side of the obstacle to follow (clockwise or counter-clockwise)
+                [rangeData, ~, sensor_angles] = getSensorData(robotPos, obstacles, sensing_range);
+                [minRange, idx] = min(rangeData);
+                minAngle = sensor_angles(idx);
+                dirToObstacle = [cos(minAngle), sin(minAngle)];
+                goalDir = (goal - robotPos) / norm(goal - robotPos);
+                crossProduct = dirToObstacle(1)*goalDir(2) - dirToObstacle(2)*goalDir(1);
+                if crossProduct > 0
+                    boundaryDirection = -1; % Counter-clockwise
+                else
+                    boundaryDirection = 1; % Clockwise
+                end
+            end
+        else
+            % Start boundary following if no line of sight to the goal
+            disp('Starting boundary following as line of sight is blocked.');
+            followBoundary = true;
+            hitPoint = robotPos;
+            pathLengthAtHitPoint = path_length;
+            min_heuristic = path_length + norm(robotPos - goal);
+            leavePoint = robotPos;
+            leavePathLength = path_length;
+            leavePointFound = false;
+            boundaryStarted = true;
+        end
+    end
+
+    % Boundary following mode
+    if followBoundary
+        % Execute a boundary following step
+        nextPos = boundaryFollowingStep(robotPos, obstacles, sensing_range, stepSize, buffer_distance, goal, robot_radius, boundaryDirection);
+
+        % Check if a valid next position was found
+        if isequal(nextPos, robotPos)
+            disp('No valid move found during boundary following. Goal may be unreachable.');
+            break;
+        end
+
+        % Ensure the next position does not go inside the obstacle
+        if isInsideObstacle(nextPos, robot_radius, obstacles)
+            disp('Boundary following failed, robot is inside an obstacle.');
+            break;
+        end
+
+        % Update path and position
+        robotPos = nextPos;
+        pathX = [pathX; robotPos(1)];
+        pathY = [pathY; robotPos(2)];
+        path_length = path_length + stepSize;
+        updateVisualization(robotPos, robot_radius, pathX, pathY, disc_robot, robot_path, robot_sensor, sensing_range);
+        pause(0.001); % Reduced pause for faster execution
+
+        % Capture the frame for the video
+        %frame = getframe(figure_handle);  % Capture the figure
+        %writeVideo(video_obj, frame);  % Write the captured frame to the video
+
+        % Update heuristic and leave point
+        currentHeuristic = path_length + norm(robotPos - goal);
+        if currentHeuristic < min_heuristic && isLineOfSight(robotPos, goal, obstacles, robot_radius)
+            min_heuristic = currentHeuristic;
+            leavePoint = robotPos;
+            leavePathLength = path_length;
+            leavePointFound = true;
+        end
+
+        % Decision to leave boundary following
+        if isLineOfSight(robotPos, goal, obstacles, robot_radius)
+            disp('Leaving boundary following as path to goal is clear.');
+            followBoundary = false;
+            continue;
+        end
+
+        % Check if the robot has returned to the hit point without finding a better leave point
+        if boundaryStarted && norm(robotPos - hitPoint) <= stepSize && path_length - pathLengthAtHitPoint > stepSize * 10
+            disp('Completed a loop around the obstacle without finding a better leave point.');
+            if leavePointFound && isLineOfSight(leavePoint, goal, obstacles, robot_radius)
+                disp('Leaving at the best leave point found.');
+                robotPos = leavePoint;
+                pathX(end) = robotPos(1);
+                pathY(end) = robotPos(2);
+                path_length = leavePathLength;
+                updateVisualization(robotPos, robot_radius, pathX, pathY, disc_robot, robot_path, robot_sensor, sensing_range);
+                followBoundary = false;
+                continue;
+            else
+                disp('No path to goal found. Goal is unreachable.');
+                break;
+            end
+        end
+    end
+end
+
+%% Close the video file
+%close(video_obj);  % Close the video after recording
+
+%% Final Visualization
+hold off;
+
+%% --- Function Definitions ---
+
+% Function to update the robot's position and path in the visualization
+%
+% Parameters:
+% robotPos: [x, y] position of the robot
+% robot_radius: Radius of the robot
+% pathX, pathY: Arrays storing the X and Y coordinates of the robot's path
+% disc_robot: Handle to the robot's graphical representation
+% robot_path: Handle to the robot's path graphical representation
+% robot_sensor: Handle to the robot's sensor range visualization
+% sensing_range: The range of the robot's sensors
+function updateVisualization(robotPos, robot_radius, pathX, pathY, disc_robot, robot_path, robot_sensor, sensing_range)
+    % Update the robot's position on the visualization
+    set(disc_robot, 'Position', [robotPos(1) - robot_radius, robotPos(2) - robot_radius, ...
+        2*robot_radius, 2*robot_radius]);
+
+    % Update the path the robot has followed
+    set(robot_path, 'XData', pathX, 'YData', pathY);
+
+    % Update the sensor visualization (circle showing sensing range)
+    theta = linspace(0, 2*pi, 360);
+    sensor_x = robotPos(1) + sensing_range * cos(theta);
+    sensor_y = robotPos(2) + sensing_range * sin(theta);
+    set(robot_sensor, 'XData', sensor_x, 'YData', sensor_y);
+
+    drawnow; % Refresh the visualization
+end
+
+% Function to check if there is a clear line of sight between two points
+%
+% Parameters:
+% p1: [x, y] position of the first point
+% p2: [x, y] position of the second point
+% obstacles: Cell array of obstacle polygons (each polygon defined by its vertices)
+% robot_radius: The radius of the robot
+%
+% Returns:
+% visible: A boolean indicating whether there is a clear line of sight between p1 and p2
+function visible = isLineOfSight(p1, p2, obstacles, robot_radius)
+    % Initialize visibility as true
+    visible = true;
+    numPoints = 200; % Number of sample points along the path
+    t = linspace(0, 1, numPoints);
+    linePoints = p1 + t' * (p2 - p1); % Generate points along the line
+
+    % Expand the obstacles to account for the robot's size
+    expandedObstacles = expandObstacles(obstacles, robot_radius);
+
+    % Check if any point along the line intersects an obstacle
+    for i = 1:length(expandedObstacles)
+        obstacle = expandedObstacles{i};
+        inObstacle = inpolygon(linePoints(:,1), linePoints(:,2), obstacle(:,1), obstacle(:,2));
+        if any(inObstacle)
+            visible = false;
+            break;
+        end
+    end
+end
+
+% Function to expand obstacles by the robot's radius
+%
+% Parameters:
+% obstacles: Cell array of obstacle polygons (each polygon defined by its vertices)
+% robot_radius: The radius of the robot
+%
+% Returns:
+% expandedObstacles: A cell array of expanded obstacle polygons (to account for robot size)
+function expandedObstacles = expandObstacles(obstacles, robot_radius)
+    % Create a buffer around each obstacle polygon to account for robot size
+    expandedObstacles = cell(size(obstacles));
+    for i = 1:length(obstacles)
+        obstacle = obstacles{i};
+        % Use the 'polybuffer' function to expand the obstacle if available
+        if exist('polybuffer', 'file')
+            poly = polyshape(obstacle(:,1), obstacle(:,2));
+            expandedPoly = polybuffer(poly, robot_radius);
+            [x, y] = boundary(expandedPoly);
+            expandedObstacles{i} = [x, y];
+        else
+            % Manual expansion (fallback if 'polybuffer' is unavailable)
+            expandedObstacles{i} = obstacle;
+        end
+    end
+end
+
+% Function to check if the robot is inside an obstacle
+%
+% Parameters:
+% robotPos: [x, y] position of the robot
+% robot_radius: The radius of the robot
+% obstacles: Cell array of obstacle polygons (each polygon defined by its vertices)
+%
+% Returns:
+% inside: A boolean indicating whether the robot is inside any obstacle
+function inside = isInsideObstacle(robotPos, robot_radius, obstacles)
+    % Initialize the 'inside' flag as false
+    inside = false;
+
+    % Expand obstacles to account for the robot's size
+    expandedObstacles = expandObstacles(obstacles, robot_radius);
+
+    % Check if the robot is inside any expanded obstacle
+    for i = 1:length(expandedObstacles)
+        obstacle = expandedObstacles{i};
+        inObstacle = inpolygon(robotPos(1), robotPos(2), obstacle(:,1), obstacle(:,2));
+        if inObstacle
+            inside = true;
+            return;
+        end
+    end
+end
+
+% Function to perform a boundary following step
+%
+% Parameters:
+% robotPos: [x, y] position of the robot
+% obstacles: Cell array of obstacle polygons
+% sensing_range: Range of the robot's sensors
+% stepSize: Step size for the robot's movement
+% buffer_distance: Safety buffer distance from obstacles
+% goal: [x, y] goal position
+% robot_radius: The radius of the robot
+% boundaryDirection: Direction of boundary following (1 for clockwise, -1 for counter-clockwise)
+%
+% Returns:
+% nextPos: [x, y] the next position of the robot after the boundary following step
+function nextPos = boundaryFollowingStep(robotPos, obstacles, sensing_range, stepSize, buffer_distance, goal, robot_radius, boundaryDirection)
+    % Perform a step along the boundary of an obstacle to avoid it
+    buffer_distance = buffer_distance + 0.2;  % Increase buffer distance for safety
+
+    % Get sensor data for detecting nearby obstacles
+    [rangeData, ~, sensor_angles] = getSensorData(robotPos, obstacles, sensing_range);
+
+    % Find the minimum range and corresponding angle (closest obstacle)
+    [minRange, idx] = min(rangeData);
+    minAngle = sensor_angles(idx);
+
+    if minRange >= sensing_range - buffer_distance - robot_radius
+        % No obstacle detected, attempt to move towards the goal
+        moveDir = (goal - robotPos) / norm(goal - robotPos);
+        nextPos = robotPos + stepSize * moveDir;
+
+        % Ensure the next position is safe
+        if isInsideObstacle(nextPos, robot_radius, obstacles)
+            nextPos = robotPos; % Stay in the current position if inside an obstacle
+        end
+        return;
+    end
+
+    % Compute the direction to the obstacle
+    obstaclePoint = robotPos + minRange * [cos(minAngle), sin(minAngle)];
+    dirToObstacle = obstaclePoint - robotPos;
+    dirToObstacle = dirToObstacle / norm(dirToObstacle);
+
+    % Compute the tangent direction (perpendicular to dirToObstacle)
+    perpDir = boundaryDirection * [-dirToObstacle(2), dirToObstacle(1)];
+
+    % Move along the tangent direction
+    nextPosCandidate = robotPos + stepSize * perpDir;
+
+    % Ensure the next move does not collide with the obstacle
+    if ~isInsideObstacle(nextPosCandidate, robot_radius, obstacles)
+        nextPos = nextPosCandidate;
+    else
+        % Try moving slightly away from the obstacle
+        offsetDir = -dirToObstacle;
+        nextPosCandidate = robotPos + stepSize * offsetDir;
+        if ~isInsideObstacle(nextPosCandidate, robot_radius, obstacles)
+            nextPos = nextPosCandidate;
+        else
+            % Try moving in the opposite tangent direction
+            perpDir = -boundaryDirection * [-dirToObstacle(2), dirToObstacle(1)];
+            nextPosCandidate = robotPos + stepSize * perpDir;
+            if ~isInsideObstacle(nextPosCandidate, robot_radius, obstacles)
+                nextPos = nextPosCandidate;
+            else
+                % No valid move, stay in the current position
+                nextPos = robotPos;
+            end
+        end
+    end
+end
+
+% Function to get sensor data (distance to obstacles)
+%
+% Parameters:
+% robotPos: [x, y] position of the robot
+% obstacles: Cell array of obstacle polygons
+% sensing_range: The range of the robot's sensors
+%
+% Returns:
+% rangeData: Array of distances to the closest obstacle in each direction
+% obstacleDetected: Boolean flag indicating whether an obstacle is detected
+% sensor_angles: Array of angles corresponding to the sensor directions
+function [rangeData, obstacleDetected, sensor_angles] = getSensorData(robotPos, obstacles, sensing_range)
+    % Simulate sensor data (range readings to obstacles)
+    sensor_resolution = 1; % Degrees between sensor rays
+    sensor_angles = deg2rad(-180:sensor_resolution:180); % 360 degrees coverage
+    numAngles = length(sensor_angles);
+    rangeData = sensing_range * ones(numAngles, 1); % Initialize range data
+    obstacleDetected = false;
+
+    % Cast rays for each sensor angle to detect obstacles
+    for i = 1:numAngles
+        angle = sensor_angles(i);
+        rayDir = [cos(angle), sin(angle)]; % Direction of the ray
+        rayEnd = robotPos + sensing_range * rayDir; % End point of the ray
+        minDist = sensing_range; % Initialize minimum distance to max sensing range
+
+        % Check for intersection with obstacles
+        for obsIdx = 1:length(obstacles)
+            obstacle = obstacles{obsIdx};
+            numVertices = size(obstacle, 1);
+            for j = 1:numVertices
+                v1 = obstacle(j, :);
+                if j == numVertices
+                    v2 = obstacle(1, :); % Loop back to the first vertex
+                else
+                    v2 = obstacle(j + 1, :);
+                end
+                [isect, point] = lineSegmentIntersect(robotPos, rayEnd, v1, v2);
+                if isect
+                    dist = norm(point - robotPos); % Distance from robot to intersection point
+                    if dist < minDist
+                        minDist = dist;
+                        obstacleDetected = true;
+                    end
+                end
+            end
+        end
+        rangeData(i) = minDist;
+    end
+end
+
+% Function to check for intersection of two line segments
+%
+% Parameters:
+% p1: First point of the first line segment
+% p2: Second point of the first line segment
+% q1: First point of the second line segment
+% q2: Second point of the second line segment
+%
+% Returns:
+% intersect: Boolean indicating whether the two line segments intersect
+% point: The intersection point if an intersection occurs
+function [intersect, point] = lineSegmentIntersect(p1, p2, q1, q2)
+    % Check if two line segments (p1-p2 and q1-q2) intersect
+    intersect = false;
+    point = [];
+
+    % Represent the lines as parametric equations
+    A = [p2(1) - p1(1), -(q2(1) - q1(1));
+         p2(2) - p1(2), -(q2(2) - q1(2))];
+
+    B = [q1(1) - p1(1);
+         q1(2) - p1(2)];
+
+    % Compute the determinant of matrix A
+    detA = det(A);
+    if abs(detA) < 1e-10
+        return; % Lines are parallel or coincident
+    end
+
+    % Solve for the parameters t and u
+    X = A \ B;
+    t = X(1);
+    u = X(2);
+
+    % Check if t and u are within the bounds of the line segments
+    epsilon = 1e-6;
+    if t >= -epsilon && t <= 1 + epsilon && u >= -epsilon && u <= 1 + epsilon
+        % Clamp t and u to [0, 1] to handle numerical inaccuracies
+        t = max(min(t, 1), 0);
+        u = max(min(u, 1), 0);
+        intersect = true;
+        point = p1 + t * (p2 - p1); % Intersection point
+    end
+end

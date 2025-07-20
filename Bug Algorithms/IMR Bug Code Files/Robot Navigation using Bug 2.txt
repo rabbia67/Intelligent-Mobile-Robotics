@@ -1,0 +1,379 @@
+%% Robot Navigation using Bug Algorithm (Bug 2 variant)
+% The robot navigates from a start position to a goal position while avoiding obstacles. 
+% The Bug 2 algorithm is implemented where the robot follows the M-line towards the goal,
+% and follows the boundary when it encounters obstacles.
+
+% Define Environment - User Input for Obstacles
+numObstacles = input('Enter number of obstacles: ');  % Number of obstacles to define
+obstacles = cell(numObstacles, 1);  % Initialize cell array to store obstacles
+
+% Input obstacle coordinates from the user
+for i = 1:numObstacles
+    fprintf('Enter coordinates for obstacle %d in the format [x1, y1; x2, y2; ...]:\n', i);
+    obstacles{i} = input('');  % Input coordinates for each obstacle
+end
+
+% Visualization Setup
+figure_handle = figure;  % Create a figure for visualization
+hold on;
+
+% Plot obstacles
+for i = 1:numObstacles
+    fill(obstacles{i}(:,1), obstacles{i}(:,2), [0.8, 0.8, 0.8]);  % Plot obstacles in light gray
+end
+
+% Set axis settings
+axis equal;
+grid on;
+xlabel('X');
+ylabel('Y');
+title('Robot Navigation Path using Bug Algorithm');
+
+% Select Start and Goal Points by Clicking on the Plot
+disp('Please click on the plot to select the start point.');
+[start_x, start_y] = ginput(1);  % User clicks to select the start point
+start = [start_x, start_y];
+fprintf('Start point selected: [%.2f, %.2f]\n', start_x, start_y);  % Print selected start point
+plot(start(1), start(2), 'ro', 'LineWidth', 2);  % Plot start point as red circle
+
+disp('Now click on the plot to select the goal point.');
+[goal_x, goal_y] = ginput(1);  % User clicks to select the goal point
+goal = [goal_x, goal_y];
+fprintf('Goal point selected: [%.2f, %.2f]\n', goal_x, goal_y);  % Print selected goal point
+plot(goal(1), goal(2), 'go', 'LineWidth', 2);  % Plot goal point as green circle
+
+% Robot Parameters
+robotRadius = 0.5;  % Radius of the robot (robot modeled as a disc)
+stepSize = 0.05;    % Reduced step size for smoother movement
+robotPos = start;   % Initial robot position set to the start position
+followBoundary = false;  % Flag to indicate whether the robot is in boundary-following mode
+hitPoint = [];  % Point where the robot hits an obstacle
+hitDistanceToGoal = Inf;  % Distance from the hit point to the goal
+
+% Plot M-line (line from start to goal)
+plot([start(1), goal(1)], [start(2), goal(2)], 'g--', 'LineWidth', 1.5);  % M-line in green dashed
+
+% Plot initial robot as a disc
+discRobot = rectangle('Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, ...
+    2*robotRadius, 2*robotRadius], 'Curvature', [1, 1], 'FaceColor', 'b');  % Blue disc represents the robot
+
+% To store the path of the robot
+pathX = robotPos(1);  % X-coordinates of the robot's path
+pathY = robotPos(2);  % Y-coordinates of the robot's path
+
+% Initialize plot for the robot's path
+robotPath = plot(pathX, pathY, 'b-', 'LineWidth', 2);  % Blue line for the robot's path
+
+% Precompute the direction of the M-line
+mLineDirection = (goal - start) / norm(goal - start);
+
+%% Video Setup
+video_filename = 'Bug2_Sample_7.avi';  % Name of the video file
+video_obj = VideoWriter(video_filename);  % Create VideoWriter object for recording
+video_obj.FrameRate = 30;  % Set frame rate for the video
+open(video_obj);  % Open the video file for writing
+
+% --- Bug Algorithm Main Loop ---
+while true
+    % Move along the M-line towards the goal
+    while ~followBoundary
+        nextPos = robotPos + stepSize * mLineDirection;  % Compute the next position along the M-line
+
+        % Check if the goal is reached
+        if norm(nextPos - goal) < stepSize
+            disp('Goal reached!');
+            robotPos = goal;  % Update robot position to goal
+            pathX = [pathX; robotPos(1)];
+            pathY = [pathY; robotPos(2)];
+            set(discRobot, 'Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, ...
+                2*robotRadius, 2*robotRadius]);
+            set(robotPath, 'XData', pathX, 'YData', pathY);
+
+            % Capture the current frame and write to the video file
+            frame = getframe(figure_handle);
+            writeVideo(video_obj, frame);
+            break;
+        end
+
+        % Check for obstacle collision
+        hitObstacle = false;
+        for j = 1:numObstacles
+            [in, on] = inpolygon(nextPos(1), nextPos(2), obstacles{j}(:,1), obstacles{j}(:,2));
+            if in || on
+                % Obstacle encountered, switch to boundary following
+                hitObstacle = true;
+                disp('Obstacle encountered. Switching to boundary following.');
+
+                % Store the hit point and the distance to the goal
+                hitPoint = robotPos;
+                hitDistanceToGoal = norm(hitPoint - goal);
+
+                % Initialize boundary following variables
+                followBoundary = true;
+                [currentEdgeIndex, edgeProgress, edgeLength, edgeDir, p1, p2, normalOffset] = ...
+                    initializeBoundaryFollowing(obstacles{j}, robotPos, robotRadius);
+                break;
+            end
+        end
+
+        if ~hitObstacle
+            % Update robot position and path if no obstacle is hit
+            robotPos = nextPos;
+            pathX = [pathX; robotPos(1)];
+            pathY = [pathY; robotPos(2)];
+            set(discRobot, 'Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, ...
+                2*robotRadius, 2*robotRadius]);
+            set(robotPath, 'XData', pathX, 'YData', pathY);
+            pause(0.01);  % Pause for visualization
+             % Capture the current frame and write to the video file
+            frame = getframe(figure_handle);
+            writeVideo(video_obj, frame);
+        else
+            break;  % Exit the M-line movement loop if an obstacle is hit
+        end
+    end
+
+    if ~followBoundary
+        break;  % Exit the main loop if the goal is reached while moving along the M-line
+    end
+
+    % --- Boundary Following ---
+    while followBoundary
+        % Move along the obstacle boundary
+        edgeProgress = edgeProgress + stepSize;  % Move along the edge of the obstacle
+
+        % Transition to the next edge if needed
+        while edgeProgress >= edgeLength
+            edgeProgress = edgeProgress - edgeLength;
+            currentEdgeIndex = currentEdgeIndex + 1;
+            if currentEdgeIndex > size(obstacles{j}, 1)
+                currentEdgeIndex = 1;  % Wrap around to the first edge
+            end
+
+            % Update edge vertices and parameters
+            p1 = obstacles{j}(currentEdgeIndex, :);
+            if currentEdgeIndex == size(obstacles{j}, 1)
+                p2 = obstacles{j}(1, :);
+            else
+                p2 = obstacles{j}(currentEdgeIndex + 1, :);
+            end
+            edgeVec = p2 - p1;
+            edgeLength = norm(edgeVec);
+            edgeDir = edgeVec / edgeLength;
+            normalOffset = [edgeDir(2), -edgeDir(1)] * robotRadius;  % Perpendicular offset
+        end
+
+        % Update robot position with offset from the obstacle
+        robotPos = (p1 + edgeDir * edgeProgress) + normalOffset;
+
+        % Update path and visualization
+        pathX = [pathX; robotPos(1)];
+        pathY = [pathY; robotPos(2)];
+        set(discRobot, 'Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, ...
+            2*robotRadius, 2*robotRadius]);
+        set(robotPath, 'XData', pathX, 'YData', pathY);
+        pause(0.01);  % Pause for visualization
+
+        % Capture the current frame and write to the video file
+        frame = getframe(figure_handle);
+        writeVideo(video_obj, frame);
+
+        % Check if goal is reached during boundary following
+        if norm(robotPos - goal) < stepSize
+            disp('Goal reached!');
+            followBoundary = false;
+            robotPos = goal;  % Update robot position to goal
+            pathX = [pathX; robotPos(1)];
+            pathY = [pathY; robotPos(2)];
+            set(discRobot, 'Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, ...
+                 2*robotRadius, 2*robotRadius]);
+            set(robotPath, 'XData', pathX, 'YData', pathY);
+
+            % Capture the current frame and write to the video file
+            frame = getframe(figure_handle);
+            writeVideo(video_obj, frame);
+            break;
+        end
+
+        % Check if the robot re-encounters the M-line closer to the goal
+        if isOnMLine(robotPos, start, goal, robotRadius) && norm(robotPos - goal) < hitDistanceToGoal
+            disp('M-line re-encountered, resuming movement towards goal.');
+            followBoundary = false;  % Exit boundary following
+            hitPoint = [];           % Reset hit point
+            hitDistanceToGoal = Inf; % Reset hit distance
+
+            % Project robot position onto the M-line
+            robotPos = projectOntoLine(robotPos, start, goal);
+
+            % Update path and visualization
+            pathX = [pathX; robotPos(1)];
+            pathY = [pathY; robotPos(2)];
+            set(discRobot, 'Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, ...
+                2*robotRadius, 2*robotRadius]);
+            set(robotPath, 'XData', pathX, 'YData', pathY);
+
+            % Capture the current frame and write to the video file
+            frame = getframe(figure_handle);
+            writeVideo(video_obj, frame);
+            break;
+        end
+
+        % Check if the hit point is re-encountered (failure condition)
+        if ~isempty(hitPoint) && norm(robotPos - hitPoint) < stepSize
+            disp('Hit point re-encountered, failure to find path to goal.');
+            return;  % Exit the function if the robot re-encounters the hit point
+        end
+    end
+end
+
+% Close the video file after reaching the goal
+close(video_obj);
+
+
+% ---  Functions ---
+
+% Function to initialize boundary following with offset
+%
+% Parameters:
+% obstacle: A matrix representing the obstacle's vertices.
+% robotPos: A 1x2 vector representing the current position of the robot.
+% robotRadius: A scalar representing the radius of the robot.
+%
+% Returns:
+% currentEdgeIndex: Index of the closest edge to the robot.
+% edgeProgress: Current progress made along the closest edge.
+% edgeLength: The length of the closest edge.
+% edgeDir: The direction vector of the closest edge.
+% p1: The starting vertex of the closest edge.
+% p2: The ending vertex of the closest edge.
+% normalOffset: The offset vector perpendicular to the closest edge to maintain safe distance.
+function [currentEdgeIndex, edgeProgress, edgeLength, edgeDir, p1, p2, normalOffset] = ...
+    initializeBoundaryFollowing(obstacle, robotPos, robotRadius)
+    numVertices = size(obstacle, 1);
+    minDist = Inf;
+    currentEdgeIndex = 0;
+    edgeProgress = 0;
+
+    % Loop through each edge to find the closest edge to the robot
+    for i = 1:numVertices
+        % Edge vertices
+        v1 = obstacle(i, :);
+        if i == numVertices
+            v2 = obstacle(1, :);
+        else
+            v2 = obstacle(i + 1, :);
+        end
+
+        % Edge vector and length
+        edgeVec = v2 - v1;
+        edgeLen = norm(edgeVec);
+        edgeDirTemp = edgeVec / edgeLen;
+
+        % Projection of robotPos onto the edge
+        projLen = dot(robotPos - v1, edgeDirTemp);
+        projLen = max(0, min(projLen, edgeLen));  % Clamp to edge
+
+        % Closest point on the edge
+        closestPoint = v1 + projLen * edgeDirTemp;
+        dist = norm(robotPos - closestPoint);
+
+        if dist < minDist
+            minDist = dist;  % Update minimum distance found
+            currentEdgeIndex = i;
+            edgeProgress = projLen;
+            edgeLength = edgeLen;
+            edgeDir = edgeDirTemp;
+            p1 = v1;
+            p2 = v2;
+            % Normal offset to keep safe distance
+            normal = [edgeDir(2), -edgeDir(1)];
+            if dot(normal, robotPos - closestPoint) < 0
+                normal = -normal;
+            end
+            normalOffset = normal * robotRadius;
+        end
+    end
+end
+
+% Function to compute distance from a point to a polygon
+%
+% Parameters:
+% polygon: A matrix representing the polygon's vertices.
+% point: A 1x2 vector representing the point of interest.
+%
+% Returns:
+% dist: The minimum distance from the point to the polygon.
+function dist = pointPolygonDistance(polygon, point)
+    numVertices = size(polygon, 1);
+    dist = Inf;
+    for i = 1:numVertices
+        v1 = polygon(i, :);
+        if i == numVertices
+            v2 = polygon(1, :);
+        else
+            v2 = polygon(i + 1, :);
+        end
+        d = pointToSegmentDistance(point, v1, v2);
+        if d < dist
+            dist = d;  % Update minimum distance
+        end
+    end
+end
+
+% Function to compute distance from a point to a line segment
+%
+% Parameters:
+% p: A 1x2 vector representing the point of interest.
+% v: A 1x2 vector representing the first vertex of the line segment.
+% w: A 1x2 vector representing the second vertex of the line segment.
+%
+% Returns:
+% d: The minimum distance between the point and the line segment.
+function d = pointToSegmentDistance(p, v, w)
+    l2 = sum((v - w).^2);  % Squared length of the line segment
+    if l2 == 0
+        d = norm(p - v);  % Return distance to v if v == w
+        return;
+    end
+    t = max(0, min(1, dot(p - v, w - v) / l2));  % Projection along the segment
+    projection = v + t * (w - v);  % Closest point on the segment
+    d = norm(p - projection);  % Distance from point to the closest point
+end
+
+% Function to check if the robot is on the M-line (modified to account for robot radius)
+%
+% Parameters:
+% robotPos: A 1x2 vector representing the current position of the robot.
+% start: A 1x2 vector representing the start point of the M-line.
+% goal: A 1x2 vector representing the goal point of the M-line.
+% robotRadius: A scalar representing the robot's radius.
+%
+% Returns:
+% onMLine: A boolean value indicating whether the robot is on the M-line.
+function onMLine = isOnMLine(robotPos, start, goal, robotRadius)
+    lineVec = goal - start;
+    robotVec = robotPos - start;
+    distance = abs(lineVec(1) * robotVec(2) - lineVec(2) * robotVec(1)) / norm(lineVec);
+    adjustedDistance = max(0, distance - robotRadius);
+    tolerance = 1e-2;  % Adjust for sensitivity
+    onLine = adjustedDistance < tolerance;
+    dotProd = dot(robotVec, lineVec);
+    onSegment = dotProd >= 0 && dotProd <= norm(lineVec)^2;
+    onMLine = onLine && onSegment;
+end
+
+% Function to project a point onto a line defined by two points
+%
+% Parameters:
+% point: A 1x2 vector representing the point of interest.
+% lineStart: A 1x2 vector representing the start point of the line.
+% lineEnd: A 1x2 vector representing the end point of the line.
+%
+% Returns:
+% projPoint: A 1x2 vector representing the projection of the point onto the line.
+function projPoint = projectOntoLine(point, lineStart, lineEnd)
+    lineVec = lineEnd - lineStart;
+    lineVec = lineVec / norm(lineVec);  % Normalize the line vector
+    projLength = dot(point - lineStart, lineVec);  % Project the point onto the line
+    projPoint = lineStart + projLength * lineVec;  % Compute the projected point
+end

@@ -1,0 +1,352 @@
+%% Robot Navigation using the Bug 1 Algorithm in a 2D Plane
+% The robot navigates from a start position to a goal position while avoiding obstacles.
+
+% --- Define Environment - User Input for Obstacles ---
+numObstacles = input('Enter number of obstacles: ');  % Number of obstacles
+obstacles = cell(numObstacles, 1);  % Initialize cell array to store obstacles
+
+% Get obstacle coordinates from user
+for i = 1:numObstacles
+    fprintf('Enter coordinates for obstacle %d in the format [x1, y1; x2, y2; ...]:\n', i);
+    obstacles{i} = input('');  % User inputs obstacle vertices
+end
+
+% --- Calculate and Store Perimeter Lengths for Obstacles ---
+obstaclePerimeters = zeros(numObstacles, 1);
+for i = 1:numObstacles
+    obstaclePerimeters(i) = computePerimeter(obstacles{i});
+end
+
+% --- Visualization Setup ---
+figure_handle = figure;  % Create a figure for visualization
+hold on;
+
+% Plot obstacles
+for i = 1:numObstacles
+    fill(obstacles{i}(:,1), obstacles{i}(:,2), [0.7, 0.7, 0.7]);  % Fill obstacles with gray color
+end
+axis equal;
+grid on;
+xlabel('X');
+ylabel('Y');
+title('Robot Navigation Path Using Bug 1 Algorithm');
+
+% Select Start and Goal Points by Clicking on the Plot
+disp('Please click on the plot to select the start point.');
+[start_x, start_y] = ginput(1);  % Wait for the user to click a point
+start = [start_x, start_y];
+fprintf('Start point selected: [%.2f, %.2f]\n', start_x, start_y);  % Print selected start point
+plot(start(1), start(2), 'ro', 'LineWidth', 2);  % Plot start point as red circle
+
+disp('Now click on the plot to select the goal point.');
+[goal_x, goal_y] = ginput(1);  % Wait for the user to click a second point
+goal = [goal_x, goal_y];
+fprintf('Goal point selected: [%.2f, %.2f]\n', goal_x, goal_y);  % Print selected goal point
+plot(goal(1), goal(2), 'go', 'LineWidth', 2);  % Plot goal point as green circle
+
+% --- Robot Parameters ---
+robotRadius = 0.5;  % Radius of the robot (robot modeled as a disc)
+stepSize = 0.1;  % Step size for each move towards the goal
+robotPos = start;  % Initialize robot position to start position
+followBoundary = false;  % Flag to check if robot is following boundary
+leavePoint = [];  % Store leave point (closest point to goal during boundary following)
+afterLoop = false;  % Flag to indicate if the robot completed the first traversal around an obstacle
+currentObstacle = [];  % Stores the current obstacle being followed
+minDistanceToGoal = Inf;  % Initialize minimum distance to goal
+leaveReached = false;  % Flag to track if the leave point was reached
+
+% To store the path of the robot
+pathX = robotPos(1);  % X-coordinates of the robot path
+pathY = robotPos(2);  % Y-coordinates of the robot path
+
+% Plot initial robot as a disc
+discRobot = rectangle('Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, 2*robotRadius, 2*robotRadius], ...
+    'Curvature', [1, 1], 'FaceColor', 'b');  % Blue circle represents the robot
+
+% Initialize path plot for visualization
+robotPath = plot(pathX, pathY, 'b-', 'LineWidth', 2);  % Blue line for the robot's path
+
+% --- Initialize Video Capture ---
+videoFileName = 'Bug1_Sample_6.avi';  % File name for the video
+videoWriter = VideoWriter(videoFileName);  % Create video writer object
+videoWriter.FrameRate = 10;  % Set frame rate for the video
+open(videoWriter);  % Open the video writer
+
+%% Bug 1 Algorithm - Main Loop
+while true
+    if ~followBoundary
+        % Move towards the goal in a straight line
+        direction = (goal - robotPos) / norm(goal - robotPos);  % Direction vector towards the goal
+        nextPos = robotPos + stepSize * direction;  % Calculate next position in the direction of the goal
+        
+        % Check if the robot collides with any obstacle (considering its radius)
+        hitObstacle = false;  % Flag for obstacle collision
+        for j = 1:numObstacles
+            % Check if the next position is inside or on the obstacle boundary
+            [in, on] = inpolygon(nextPos(1), nextPos(2), obstacles{j}(:,1), obstacles{j}(:,2));
+            if in || on
+                % Calculate distance to the obstacle
+                distToObstacle = pointPolygonDistance(obstacles{j}, nextPos);
+                if distToObstacle < robotRadius
+                    % Collision detected
+                    hitObstacle = true;  % Set collision flag
+                    currentObstacle = obstacles{j};  % Store the current obstacle
+                    followBoundary = true;  % Switch to boundary following mode
+                    disp('Obstacle hit! Following the boundary.');
+                    
+                    % Reset variables for new obstacle
+                    leavePoint = robotPos;
+                    minDistanceToGoal = norm(robotPos - goal);  % Reset minimum distance to goal
+                    afterLoop = false;  % Reset the loop flag
+                    leaveReached = false;  % Reset leave point reached flag
+                    
+                    boundaryTraversalDistance = 0;  % Initialize distance traveled along boundary
+                    currentObstacleIndex = j;       % Store current obstacle index
+
+                    % Initialize boundary following variables
+                    [currentEdgeIndex, edgeProgress, edgeLength, edgeDir, p1, p2, normalOffset] = initializeBoundaryFollowing(currentObstacle, robotPos, robotRadius);
+                    
+                    % Store the hit point data for future reference
+                    hitPointEdgeIndex = currentEdgeIndex;
+                    hitPointEdgeProgress = edgeProgress;
+                    hitPointP1 = p1;
+                    hitPointP2 = p2;
+                    hitPointEdgeLength = edgeLength;
+                    hitPointEdgeDir = edgeDir;
+                    hitPointNormalOffset = normalOffset;
+                    break;
+                end
+            end
+        end
+        
+        % If no obstacle was hit, move the robot forward
+        if ~hitObstacle
+            robotPos = nextPos;  % Update robot position
+            pathX = [pathX; robotPos(1)];  % Append new X coordinate to the path
+            pathY = [pathY; robotPos(2)];  % Append new Y coordinate to the path
+        end
+    else
+        % Follow the boundary of the current obstacle
+        if ~isempty(currentObstacle)
+            edgeProgress = edgeProgress + stepSize;  % Move along the boundary edge
+            
+            % Update the boundary traversal distance
+            distanceMoved = stepSize;  % Distance moved along the boundary
+            boundaryTraversalDistance = boundaryTraversalDistance + distanceMoved;
+
+            % If the edge length is exceeded, move to the next edge
+            while edgeProgress >= edgeLength
+                edgeProgress = edgeProgress - edgeLength;
+                currentEdgeIndex = currentEdgeIndex + 1;  % Move to the next edge
+                if currentEdgeIndex > size(currentObstacle, 1)
+                    currentEdgeIndex = 1;  % Wrap around to the first edge
+                end
+                
+                % Update edge points and direction
+                p1 = currentObstacle(currentEdgeIndex, :);
+                if currentEdgeIndex == size(currentObstacle, 1)
+                    p2 = currentObstacle(1, :);
+                else
+                    p2 = currentObstacle(currentEdgeIndex + 1, :);
+                end
+                
+                edgeVec = p2 - p1;
+                edgeLength = norm(edgeVec);
+                edgeDir = edgeVec / edgeLength;  % Direction vector for the edge
+                normalOffset = [edgeDir(2), -edgeDir(1)] * robotRadius;  % Perpendicular vector for offset
+            end
+            
+            % Update robot position along the edge
+            robotPos = (p1 + edgeDir * edgeProgress) + normalOffset;
+            pathX = [pathX; robotPos(1)];  % Append new X coordinate to the path
+            pathY = [pathY; robotPos(2)];  % Append new Y coordinate to the path
+            
+            % Check if the current position is the closest to the goal during traversal
+            distanceToGoal = norm(robotPos - goal);
+            if ~afterLoop && distanceToGoal < minDistanceToGoal
+                minDistanceToGoal = distanceToGoal;
+                leavePoint = robotPos;  % Update leave point if closer to goal
+            end
+            
+            % Check if the robot has completed the first loop around the obstacle
+            if boundaryTraversalDistance >= obstaclePerimeters(currentObstacleIndex) && ...
+               currentEdgeIndex == hitPointEdgeIndex && ...
+               abs(edgeProgress - hitPointEdgeProgress) < stepSize
+                if ~afterLoop
+                    disp('Completed full traversal around obstacle.');
+                    afterLoop = true;  % First traversal completed
+                else
+                    % After completing one full traversal, move to the leave point
+                    if norm(robotPos - leavePoint) < stepSize
+                        disp('Reached leave point. Proceeding towards the goal.');
+                        followBoundary = false;  % Exit boundary following
+                        leaveReached = true;  % Mark that the leave point was reached
+                    end
+                end
+            end
+            
+            % During the second traversal, follow boundary until reaching the leave point
+            if afterLoop && ~leaveReached
+                % Move towards the leave point while staying on the boundary
+                if norm(robotPos - leavePoint) > stepSize
+                    % Continue along the boundary until reaching the leave point
+                    robotPos = (p1 + edgeDir * edgeProgress) + normalOffset;
+                else
+                    % If the leave point is reached, exit boundary following
+                    disp('Leave point reached.');
+                    followBoundary = false;
+                end
+            end
+        end
+    end
+    
+    % Update robot position and path visualization
+    set(discRobot, 'Position', [robotPos(1) - robotRadius, robotPos(2) - robotRadius, 2*robotRadius, 2*robotRadius]);
+    set(robotPath, 'XData', pathX, 'YData', pathY);  % Update path plot
+    
+    % Capture the current frame for video
+    frame = getframe(gcf);
+    writeVideo(videoWriter, frame);  % Write the current frame to video
+    
+    pause(0.05);  % Pause for visualization purposes
+    
+    % Check if the robot has reached the goal
+    if norm(robotPos - goal) < stepSize
+        disp('Goal reached!');
+        break;
+    end
+end
+
+% --- Close the Video File ---
+close(videoWriter);  % Close the video file after capturing all frames
+
+% --- Functions --- %
+
+% Function to initialize boundary following with an offset
+%
+% Parameters:
+%   obstacle: Matrix representing the vertices of the obstacle
+%   robotPos: Current position of the robot
+%   robotRadius: Radius of the robot
+%
+% Returns:
+%   currentEdgeIndex: Index of the closest edge
+%   edgeProgress: Progress made along the edge
+%   edgeLength: Length of the current edge
+%   edgeDir: Direction of the current edge
+%   p1, p2: Start and end vertices of the edge
+%   normalOffset: Perpendicular offset to avoid collision with the obstacle
+function [currentEdgeIndex, edgeProgress, edgeLength, edgeDir, p1, p2, normalOffset] = initializeBoundaryFollowing(obstacle, robotPos, robotRadius)
+    numVertices = size(obstacle, 1);  % Number of vertices in the obstacle
+    minDist = Inf;
+    currentEdgeIndex = 0;
+    edgeProgress = 0;
+    edgeLength = 0;
+    edgeDir = [0, 0];
+    p1 = [0, 0];
+    p2 = [0, 0];
+    normalOffset = [0, 0];
+    
+    for i = 1:numVertices
+        v1 = obstacle(i, :);  % Starting vertex of the edge
+        if i == numVertices
+            v2 = obstacle(1, :);  % Wrap around to the first vertex for the last edge
+        else
+            v2 = obstacle(i+1, :);  % Ending vertex of the edge
+        end
+        
+        edgeVec = v2 - v1;
+        edgeLen = norm(edgeVec);
+        edgeDirTemp = edgeVec / edgeLen;
+        projLen = dot(robotPos - v1, edgeDirTemp);
+        
+        projLen = max(0, min(projLen, edgeLen));  % Constrain projection to the edge length
+        
+        closestPoint = v1 + projLen * edgeDirTemp;
+        
+        dist = norm(robotPos - closestPoint);  % Distance from robot to the closest point on the edge
+        
+        if dist < minDist
+            minDist = dist;
+            currentEdgeIndex = i;
+            edgeProgress = projLen;
+            edgeLength = edgeLen;
+            edgeDir = edgeDirTemp;
+            p1 = v1;
+            p2 = v2;
+            normal = [edgeDir(2), -edgeDir(1)];
+            if dot(normal, robotPos - closestPoint) < 0
+                normal = -normal;
+            end
+            normalOffset = normal * robotRadius;  % Offset the robot to avoid the obstacle
+        end
+    end
+end
+
+% Function to calculate the distance from a point to a polygon
+%
+% Parameters:
+%   polygon: Matrix representing the vertices of the polygon
+%   point: Coordinates of the point
+%
+% Returns:
+%   dist: Minimum distance between the point and the polygon
+function dist = pointPolygonDistance(polygon, point)
+    numVertices = size(polygon, 1);  % Number of vertices in the polygon
+    dist = Inf;  % Initialize distance as infinite
+    for i = 1:numVertices
+        v1 = polygon(i, :);
+        if i == numVertices
+            v2 = polygon(1, :);  % Wrap around to the first vertex for the last edge
+        else
+            v2 = polygon(i+1, :);
+        end
+        % Calculate the distance from the point to the edge
+        d = pointToSegmentDistance(point, v1, v2);
+        if d < dist
+            dist = d;  % Update the minimum distance if a closer edge is found
+        end
+    end
+end
+
+% Function to calculate the distance from a point to a line segment
+%
+% Parameters:
+%   p: Coordinates of the point
+%   v: Start vertex of the line segment
+%   w: End vertex of the line segment
+%
+% Returns:
+%   d: Minimum distance between the point and the line segment
+function d = pointToSegmentDistance(p, v, w)
+    l2 = sum((v - w).^2);  % Squared length of the segment
+    if l2 == 0
+        d = norm(p - v);  % If v == w, return the distance to v
+        return;
+    end
+    t = max(0, min(1, dot(p - v, w - v) / l2));  % Projection of point onto the segment
+    projection = v + t * (w - v);  % Closest point on the segment
+    d = norm(p - projection);  % Distance from the point to the closest point on the segment
+end
+
+% Function to compute the perimeter (total length) of a polygon
+%
+% Parameters:
+%   polygon: Matrix representing the vertices of the polygon
+%
+% Returns:
+%   perimeter: Total perimeter length of the polygon
+function perimeter = computePerimeter(polygon)
+    numVertices = size(polygon, 1);
+    perimeter = 0;
+    for j = 1:numVertices
+        v1 = polygon(j, :);
+        if j == numVertices
+            v2 = polygon(1, :);
+        else
+            v2 = polygon(j + 1, :);
+        end
+        edgeLength = norm(v2 - v1);
+        perimeter = perimeter + edgeLength;
+    end
+end

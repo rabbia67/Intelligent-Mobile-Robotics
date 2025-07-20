@@ -1,0 +1,515 @@
+% Sphere World Path Planning with Final Local Minima Fix
+% This script performs path planning in a circular world with spherical obstacles
+% using a potential field approach. It includes mechanisms to avoid local minima 
+% by implementing a random walk strategy when the robot gets stuck.
+
+clear; close all; clc;
+
+%% Video Setup
+% Initialize video recording for the path planning simulation.
+video_filename = 'Final_Path_Planning.avi'; % Name of the output video file
+video_obj = VideoWriter(video_filename);      % Create VideoWriter object
+video_obj.FrameRate = 30;                     % Set the frame rate
+open(video_obj);                              % Open the video file for writing
+
+%% World Parameters
+% Define the dimensions of the world and the robot.
+world_radius = 40; % Radius of the circular world
+robot_radius = 1;  % Radius of the robot
+
+%% Potential Field Parameters
+% Set parameters for the attractive and repulsive potential fields.
+kappa = 1;       % Initial exponent for the attractive potential
+lambda = 10.0;   % Weighting factor for the repulsive potential
+max_retries = 10;% Maximum retries to escape collision before initiating random walk
+
+%% Obstacle Input Parameters
+% Prompt the user to input obstacle configurations.
+num_obstacles = input('Enter the number of obstacles: ');
+
+obstacles = cell(num_obstacles, 1);
+for i = 1:num_obstacles
+    fprintf('Enter the number of vertices for obstacle %d: ', i);
+    num_vertices = input('');
+    fprintf('Enter the coordinates of the vertices as a Nx2 matrix [x1, y1; x2, y2; ...]:\n');
+    coords = input('');
+    if size(coords, 1) ~= num_vertices || size(coords, 2) ~= 2
+        error('Invalid coordinates. Please enter a Nx2 matrix of coordinates.');
+    end
+    obstacles{i} = coords;
+end
+
+% Preprocess obstacles to include their radii.
+sphere_radius = 1.5; % Default radius for obstacle spheres
+for i = 1:num_obstacles
+    coords = obstacles{i};
+    obstacles{i} = [coords, repmat(sphere_radius, size(coords, 1), 1)];
+end
+
+% Inflate obstacles to account for the robot's size.
+inflated_obstacles = inflateSpheres(obstacles, robot_radius, world_radius);
+
+%% Visualization Setup
+% Set up the plotting environment for visualization.
+figure_handle = figure;
+hold on;
+axis equal;
+grid on;
+title("Sphere World Path Planning");
+axis([-world_radius - 5, world_radius + 5, -world_radius - 5, world_radius + 5]);
+
+% Plot the circular boundary of the world.
+theta_circle = linspace(0, 2 * pi, 200);
+x_boundary = world_radius * cos(theta_circle);
+y_boundary = world_radius * sin(theta_circle);
+plot(x_boundary, y_boundary, 'k-', 'LineWidth', 2);
+
+% Plot the inflated obstacles.
+plotSpheres(inflated_obstacles);
+
+% Select start and goal points interactively.
+[start_pos, ~, goal_pos] = selectStartAndGoal(inflated_obstacles, world_radius);
+
+% Plot the start and goal positions.
+plot(start_pos(1), start_pos(2), 'og', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+plot(goal_pos(1), goal_pos(2), 'ob', 'MarkerSize', 10, 'MarkerFaceColor', 'b');
+
+%% Robot Movement Simulation Parameters
+% Define parameters controlling the robot's movement and simulation behavior.
+max_steps = 3000;              % Maximum number of simulation steps
+initial_step_size = 0.3;       % Initial step size for robot movement
+tolerance = 3.0;                % Distance tolerance to consider the goal as reached
+fine_tolerance = 1.0;           % Tighter tolerance near the goal
+fine_tuning_radius = 5;         % Radius within which to switch to fine-tuning mode
+stuck_threshold = 1e-3;         % Gradient magnitude threshold to consider the robot as stuck
+adaptive_kappa_factor = 10;     % Factor to increase kappa near the goal
+
+gradient_step_size = 1e-3;      % Step size for finite difference gradient approximation
+
+% Initialize the robot's path.
+current_pos = start_pos;
+X = current_pos(1);
+Y = current_pos(2);
+
+% Initialize a counter to track how long the robot has been stuck.
+stuck_counter = 0;
+
+%% Movement Simulation Loop
+% Simulate the robot's movement towards the goal while avoiding obstacles.
+for t = 1:max_steps
+    % Calculate the distance to the goal.
+    distance_to_goal = norm(current_pos - goal_pos);
+    
+    % Dynamically adjust potential field parameters when near the goal.
+    if distance_to_goal < fine_tuning_radius
+        % Enter fine-tuning mode with reduced step size and increased attraction.
+        step_size = initial_step_size * 0.2;   % Decrease step size for finer movements
+        kappa = adaptive_kappa_factor;         % Increase the exponent for the attractive potential
+        lambda = 5.0;                          % Reduce the weight for the repulsive potential
+        tolerance = fine_tolerance;            % Tighten the goal tolerance
+    else
+        % Use default parameters for normal movement.
+        step_size = initial_step_size;
+        kappa = 1;
+        lambda = 10.0;
+    end
+
+    % Compute the navigation function and its gradient.
+    phi_val = phi(current_pos, goal_pos, inflated_obstacles, world_radius, kappa, lambda);
+    [grad_phi_x, grad_phi_y] = gradient_phi(current_pos, goal_pos, inflated_obstacles, world_radius, kappa, lambda, gradient_step_size);
+    grad_phi = [grad_phi_x, grad_phi_y];
+
+    % Normalize the gradient vector.
+    grad_norm = norm(grad_phi);
+    if grad_norm > 0
+        grad_phi = grad_phi / grad_norm;
+    end
+
+    % Handle scenarios where the gradient is too low, indicating a potential local minima.
+    if grad_norm < stuck_threshold
+        stuck_counter = stuck_counter + 1;
+        disp('Low gradient detected, applying goal-directed force.');
+        goal_direction = (goal_pos - current_pos) / norm(goal_pos - current_pos);
+        grad_phi = grad_phi + 0.5 * goal_direction; % Blend gradient with a goal-directed force
+        grad_phi = grad_phi / norm(grad_phi);        % Re-normalize the gradient
+        
+        % If the robot has been stuck for too long, perform a random walk.
+        if stuck_counter > max_retries
+            disp('Stuck for too long, performing random walk.');
+            random_jump = 5 * (2 * rand(1, 2) - 1);  % Generate a random jump vector
+            current_pos = current_pos + random_jump; % Update the current position
+            stuck_counter = 0;                       % Reset the stuck counter
+            continue;
+        end
+    else
+        stuck_counter = 0; % Reset the stuck counter if the gradient is sufficient
+    end
+
+    % Propose a tentative new position based on the negative gradient direction.
+    delta_q = -step_size * grad_phi;
+    new_pos = current_pos + delta_q;
+
+    % Check for collisions along the path to the new position.
+    if checkPathCollision(current_pos, new_pos, inflated_obstacles, 10)
+        disp('Collision detected. Adjusting movement.');
+        for retry = 1:max_retries
+            escape_direction = 2 * (rand(1, 2) - 0.5);             % Generate a random escape direction
+            escape_direction = escape_direction / norm(escape_direction); % Normalize the direction
+            delta_q = step_size * escape_direction;               % Compute the escape step
+            new_pos = current_pos + delta_q;                      % Update the tentative position
+            if ~checkPathCollision(current_pos, new_pos, inflated_obstacles, 10)
+                break; % Exit the retry loop if no collision is detected
+            end
+        end
+    end
+
+    % Adjust the position if the new position is outside the world boundary.
+    if norm(new_pos) > (world_radius - robot_radius)
+        disp('Boundary detected. Adjusting movement.');
+        direction_to_center = -new_pos / norm(new_pos);           % Compute direction towards the center
+        delta_q = direction_to_center * step_size * 0.5;        % Compute a corrective step
+        new_pos = current_pos + delta_q;                         % Update the position
+    end
+
+    % Update the current position of the robot.
+    current_pos = new_pos;
+
+    % Store the robot's path and plot the current position.
+    X = [X; current_pos(1)];
+    Y = [Y; current_pos(2)];
+    plot(X, Y, '-b', 'LineWidth', 1.5);                    % Plot the path
+    plot(current_pos(1), current_pos(2), 'ob', 'MarkerSize', 2, 'MarkerFaceColor', 'b'); % Plot the current position
+    drawnow;
+
+    % Capture frames for the video at specified intervals.
+    if mod(t, 5) == 0
+        frame = getframe(figure_handle);
+        writeVideo(video_obj, frame);
+    end
+
+    % Check if the robot has reached the goal within the specified tolerance.
+    if distance_to_goal < tolerance
+        disp(['Goal reached! Final distance to goal: ', num2str(distance_to_goal)]);
+        frame = getframe(figure_handle);
+        writeVideo(video_obj, frame);
+        break;
+    end
+end
+
+% Close the video file after the simulation.
+close(video_obj);
+
+%% Functions
+
+% ---------------------------------------------------------------------------------
+% Function: inflateSpheres
+% ---------------------------------------------------------------------------------
+% Inflates each spherical obstacle by a specified radius to account for the robot's size.
+%
+% Inputs:
+%   obstacles       - Cell array containing obstacle coordinates and radii.
+%   inflated_radius - Scalar value by which to inflate each obstacle's radius.
+%   world_radius     - Scalar value representing the radius of the world boundary.
+%
+% Outputs:
+%   inflated_spheres - Cell array containing inflated obstacle coordinates and radii.
+%
+function inflated_spheres = inflateSpheres(obstacles, inflated_radius, world_radius)
+    inflated_spheres = cell(size(obstacles));
+    for i = 1:length(obstacles)
+        obs = obstacles{i};
+        
+        % Ensure each obstacle has a radius; if not, assign the inflated_radius.
+        if size(obs, 2) == 2
+            obs = [obs, ones(size(obs, 1), 1) * inflated_radius];
+        end
+
+        % Inflate each obstacle's radius by the specified inflated_radius.
+        inflated_obs = zeros(size(obs, 1), 3);
+        inflated_obs(:, 1:2) = obs(:, 1:2);            % Copy x and y coordinates
+        inflated_obs(:, 3) = obs(:, 3) + inflated_radius; % Inflate radius
+        
+        % Ensure inflated obstacles remain within the world boundary.
+        for j = 1:size(inflated_obs, 1)
+            if norm(inflated_obs(j, 1:2)) + inflated_obs(j, 3) > world_radius
+                inflated_obs(j, 3) = world_radius - norm(inflated_obs(j, 1:2));
+            end
+        end
+        
+        inflated_spheres{i} = inflated_obs;
+    end
+end
+
+% ---------------------------------------------------------------------------------
+% Function: plotSpheres
+% ---------------------------------------------------------------------------------
+% Plots spherical obstacles on the current figure with specified transparency.
+%
+% Inputs:
+%   obstacles - Cell array containing obstacle coordinates and radii.
+%
+% Outputs:
+%   None
+%
+function plotSpheres(obstacles)
+    theta = linspace(0, 2*pi, 50); % Angle vector for drawing circles
+    for i = 1:length(obstacles)
+        obs = obstacles{i};
+        for j = 1:size(obs, 1)
+            x_center = obs(j, 1);
+            y_center = obs(j, 2);
+            radius = obs(j, 3); % Radius of the current obstacle
+            x_circle = x_center + radius * cos(theta); % X coordinates of the circle
+            y_circle = y_center + radius * sin(theta); % Y coordinates of the circle
+            fill(x_circle, y_circle, [0.8, 0.8, 0.8], 'EdgeColor', 'k', 'FaceAlpha', 0.7); % Draw the circle with transparency
+        end
+    end
+end
+
+% ---------------------------------------------------------------------------------
+% Function: selectStartAndGoal
+% ---------------------------------------------------------------------------------
+% Allows the user to interactively select start and goal points on the plot.
+%
+% Inputs:
+%   obstacles     - Cell array containing inflated obstacle coordinates and radii.
+%   world_radius   - Scalar value representing the radius of the world boundary.
+%
+% Outputs:
+%   start_pos - 1x2 vector representing the start position [x, y].
+%   theta     - Placeholder output (not used in this function).
+%   goal_pos  - 1x2 vector representing the goal position [x, y].
+%
+function [start_pos, theta, goal_pos] = selectStartAndGoal(obstacles, world_radius)
+    figure(gcf); % Ensure plotting occurs on the current figure
+
+    % Select the start position.
+    while true
+        disp('Please select the **start point** on the plot (inside the world boundary and outside obstacles)');
+        [x, y] = ginput(1); % Wait for user input
+        distance = norm([x, y]);
+        fprintf('Selected Start Point: (%.2f, %.2f), Distance from Origin: %.2f\n', x, y, distance);
+        if distance <= (world_radius - 0.1) && ~pointInSpheres([x, y], obstacles)
+            start_pos = [x, y];
+            theta = 0; % Placeholder (can be used for future extensions)
+            plot(x, y, 'og', 'MarkerSize', 10, 'MarkerFaceColor', 'g'); % Plot the start point
+            break;
+        else
+            disp('Start point is either inside an obstacle or outside the world boundary. Please select a different point.');
+        end
+    end
+
+    % Select the goal position.
+    while true
+        disp('Please select the **goal point** on the plot (inside the world boundary and outside obstacles)');
+        [x_goal, y_goal] = ginput(1); % Wait for user input
+        distance_goal = norm([x_goal, y_goal]);
+        fprintf('Selected Goal Point: (%.2f, %.2f), Distance from Origin: %.2f\n', x_goal, y_goal, distance_goal);
+        if distance_goal <= (world_radius - 0.1) && ~pointInSpheres([x_goal, y_goal], obstacles)
+            goal_pos = [x_goal, y_goal];
+            plot(goal_pos(1), goal_pos(2), 'ob', 'MarkerSize', 10, 'MarkerFaceColor', 'b'); % Plot the goal point
+            break;
+        else
+            disp('Goal point is either inside an obstacle or outside the world boundary. Please select a different point.');
+        end
+    end
+end
+
+% ---------------------------------------------------------------------------------
+% Function: pointInSpheres
+% ---------------------------------------------------------------------------------
+% Determines whether a given point lies inside any of the inflated spherical obstacles.
+%
+% Inputs:
+%   point     - 1x2 vector representing the point [x, y].
+%   obstacles - Cell array containing inflated obstacle coordinates and radii.
+%
+% Outputs:
+%   inside - Boolean value indicating if the point is inside any obstacle.
+%
+function inside = pointInSpheres(point, obstacles)
+    inside = false;
+    for i = 1:length(obstacles)
+        obs = obstacles{i};
+        for j = 1:size(obs, 1)
+            x_center = obs(j, 1);
+            y_center = obs(j, 2);
+            radius = obs(j, 3);
+            if norm(point - [x_center, y_center]) < radius
+                inside = true;
+                return; % Exit early if the point is inside any obstacle
+            end
+        end
+    end
+end
+
+% ---------------------------------------------------------------------------------
+% Function: checkPathCollision
+% ---------------------------------------------------------------------------------
+% Checks whether the path between two points intersects any of the inflated obstacles.
+%
+% Inputs:
+%   current_pos       - 1x2 vector representing the current position [x, y].
+%   new_pos           - 1x2 vector representing the new position [x, y].
+%   inflated_obstacles - Cell array containing inflated obstacle coordinates and radii.
+%   step_divisions     - Number of intermediate steps to check along the path.
+%
+% Outputs:
+%   collision - Boolean value indicating if a collision is detected along the path.
+%
+function collision = checkPathCollision(current_pos, new_pos, inflated_obstacles, step_divisions)
+    collision = false;
+    delta = (new_pos - current_pos) / step_divisions; % Incremental step vector
+    for k = 1:step_divisions
+        intermediate_pos = current_pos + k * delta;   % Intermediate position along the path
+        for i = 1:length(inflated_obstacles)
+            obs = inflated_obstacles{i};
+            for j = 1:size(obs, 1)
+                distance = norm(intermediate_pos - obs(j, 1:2));
+                if distance < obs(j, 3)
+                    collision = true;
+                    return; % Exit early if a collision is detected
+                end
+            end
+        end
+    end
+end
+
+% ---------------------------------------------------------------------------------
+% Function: beta
+% ---------------------------------------------------------------------------------
+% Computes the repulsive potential due to obstacles and world boundaries.
+%
+% Inputs:
+%   q            - 1x2 vector representing the current position [x, y].
+%   obstacles    - Cell array containing inflated obstacle coordinates and radii.
+%   world_radius  - Scalar value representing the radius of the world boundary.
+%
+% Outputs:
+%   beta_val - Scalar value of the total repulsive potential at position q.
+%
+function beta_val = beta(q, obstacles, world_radius)
+    beta_val_obstacles = 0;                    % Initialize repulsive potential from obstacles
+    influence_distance_obstacle = 15;          % Influence distance for obstacles
+    eta = 500;                                 % Scaling factor for obstacle repulsion
+
+    % Calculate repulsive potential from each obstacle.
+    for i = 1:length(obstacles)
+        obs = obstacles{i};
+        for j = 1:size(obs, 1)
+            distance = sqrt(dSquared(q, obs(j, 1:2))) - obs(j, 3);
+            if distance < influence_distance_obstacle && distance > 0
+                % Polynomial repulsive potential
+                beta_val_obstacles = beta_val_obstacles + eta * ((1/distance) - (1/influence_distance_obstacle))^2;
+            end
+        end
+    end
+
+    % Calculate repulsive potential from the world boundary.
+    distance_boundary = world_radius - norm(q);
+    influence_distance_boundary = 10;           % Influence distance for boundary
+    eta_boundary = 500;                         % Scaling factor for boundary repulsion
+
+    if distance_boundary < influence_distance_boundary && distance_boundary > 0
+        % Polynomial repulsive potential for boundary
+        beta_val_boundary = eta_boundary * ((1/distance_boundary) - (1/influence_distance_boundary))^2;
+    else
+        beta_val_boundary = 0;
+    end
+
+    % Combine repulsive potentials from obstacles and boundary.
+    beta_val = beta_val_obstacles + beta_val_boundary;
+end
+
+% ---------------------------------------------------------------------------------
+% Function: gamma
+% ---------------------------------------------------------------------------------
+% Computes the attractive potential towards the goal.
+%
+% Inputs:
+%   q        - 1x2 vector representing the current position [x, y].
+%   goal_pos - 1x2 vector representing the goal position [x, y].
+%   kappa    - Exponent for the attractive potential function.
+%
+% Outputs:
+%   gamma_val - Scalar value of the attractive potential at position q.
+%
+function gamma_val = gamma(q, goal_pos, kappa)
+    % Attractive potential defined as a power function of the distance to the goal.
+    gamma_val = (dSquared(q, goal_pos))^(kappa);
+end
+
+% ---------------------------------------------------------------------------------
+% Function: phi
+% ---------------------------------------------------------------------------------
+% Computes the navigation function combining attractive and repulsive potentials.
+%
+% Inputs:
+%   q               - 1x2 vector representing the current position [x, y].
+%   goal_pos        - 1x2 vector representing the goal position [x, y].
+%   obstacles       - Cell array containing inflated obstacle coordinates and radii.
+%   world_radius     - Scalar value representing the radius of the world boundary.
+%   kappa           - Exponent for the attractive potential function.
+%   lambda          - Weighting factor for the repulsive potential.
+%
+% Outputs:
+%   phi_val - Scalar value of the navigation function at position q.
+%
+function phi_val = phi(q, goal_pos, obstacles, world_radius, kappa, lambda)
+    gamma_val = gamma(q, goal_pos, kappa);   % Compute attractive potential
+    beta_val = beta(q, obstacles, world_radius); % Compute repulsive potential
+
+    phi_val = gamma_val + lambda * beta_val;  % Combine potentials
+end
+
+% ---------------------------------------------------------------------------------
+% Function: gradient_phi
+% ---------------------------------------------------------------------------------
+% Approximates the gradient of the navigation function using finite differences.
+%
+% Inputs:
+%   q               - 1x2 vector representing the current position [x, y].
+%   goal_pos        - 1x2 vector representing the goal position [x, y].
+%   obstacles       - Cell array containing inflated obstacle coordinates and radii.
+%   world_radius     - Scalar value representing the radius of the world boundary.
+%   kappa           - Exponent for the attractive potential function.
+%   lambda          - Weighting factor for the repulsive potential.
+%   h               - Step size for finite difference approximation.
+%
+% Outputs:
+%   grad_phi_x - Partial derivative of phi with respect to x at position q.
+%   grad_phi_y - Partial derivative of phi with respect to y at position q.
+%
+function [grad_phi_x, grad_phi_y] = gradient_phi(q, goal_pos, obstacles, world_radius, kappa, lambda, h)
+    % Compute phi at (x + h, y)
+    phi1 = phi([q(1) + h, q(2)], goal_pos, obstacles, world_radius, kappa, lambda);
+    
+    % Compute phi at (x - h, y)
+    phi2 = phi([q(1) - h, q(2)], goal_pos, obstacles, world_radius, kappa, lambda);
+    
+    % Compute phi at (x, y + h)
+    phi3 = phi([q(1), q(2) + h], goal_pos, obstacles, world_radius, kappa, lambda);
+    
+    % Compute phi at (x, y - h)
+    phi4 = phi([q(1), q(2) - h], goal_pos, obstacles, world_radius, kappa, lambda);
+    
+    % Approximate the gradient using central differences.
+    grad_phi_x = (phi1 - phi2) / (2 * h);
+    grad_phi_y = (phi3 - phi4) / (2 * h);
+end
+
+% ---------------------------------------------------------------------------------
+% Function: dSquared
+% ---------------------------------------------------------------------------------
+% Computes the squared Euclidean distance between two points.
+%
+% Inputs:
+%   p1 - 1x2 vector representing the first point [x1, y1].
+%   p2 - 1x2 vector representing the second point [x2, y2].
+%
+% Outputs:
+%   d2 - Scalar value of the squared distance between p1 and p2.
+%
+function d2 = dSquared(p1, p2)
+    d2 = (p1(1) - p2(1))^2 + (p1(2) - p2(2))^2;
+end
